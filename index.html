@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen AI 助手</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 20px;
+            height: calc(100vh - 40px);
+        }
+
+        /* 侧边栏 */
+        .sidebar {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            overflow-y: auto;
+        }
+
+        .sidebar h1 {
+            font-size: 24px;
+            color: #333;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sidebar h1::before {
+            content: '✨';
+            font-size: 28px;
+        }
+
+        .version {
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 20px;
+        }
+
+        .config-section {
+            margin-bottom: 24px;
+        }
+
+        .config-section h3 {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .input-group {
+            margin-bottom: 12px;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 13px;
+            color: #555;
+            margin-bottom: 6px;
+        }
+
+        .input-group input,
+        .input-group select,
+        .input-group textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .input-group input:focus,
+        .input-group select:focus,
+        .input-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .input-group textarea {
+            resize: vertical;
+            min-height: 60px;
+        }
+
+        .model-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .model-btn {
+            padding: 10px 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            background: white;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: left;
+        }
+
+        .model-btn:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+
+        .model-btn.active {
+            border-color: #667eea;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .model-btn .model-name {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .model-btn .model-desc {
+            font-size: 10px;
+            opacity: 0.7;
+        }
+
+        .image-size-group {
+            margin-top: 12px;
+        }
+
+        /* 主内容区 */
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .chat-container {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            padding-bottom: 16px;
+            border-bottom: 2px solid #f0f0f0;
+            margin-bottom: 16px;
+        }
+
+        .chat-header h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 4px;
+        }
+
+        .chat-header p {
+            font-size: 13px;
+            color: #999;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 8px;
+            margin-bottom: 16px;
+        }
+
+        .message {
+            margin-bottom: 16px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .message-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .user-avatar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .assistant-avatar {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .message-role {
+            font-weight: 600;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .message-content {
+            background: #f8f9fa;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin-left: 40px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .message-content img {
+            max-width: 100%;
+            border-radius: 8px;
+            margin-top: 8px;
+        }
+
+        .message-content video {
+            max-width: 100%;
+            border-radius: 8px;
+            margin-top: 8px;
+        }
+
+        .message-content.loading {
+            color: #999;
+        }
+
+        .message-content.loading::after {
+            content: '...';
+            animation: dots 1.5s infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        .input-container {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .image-preview {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .image-preview-item {
+            position: relative;
+            width: 80px;
+            height: 80px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid #e0e0e0;
+        }
+
+        .image-preview-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .image-preview-item button {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .chat-input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 14px;
+            resize: none;
+            min-height: 50px;
+            max-height: 200px;
+            font-family: inherit;
+        }
+
+        .chat-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #666;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .btn-icon {
+            width: 50px;
+            padding: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* 状态栏 */
+        .status-bar {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-dot.error {
+            background: #f44336;
+        }
+
+        /* 响应式 */
+        @media (max-width: 900px) {
+            .container {
+                grid-template-columns: 1fr;
+                height: auto;
+            }
+
+            .sidebar {
+                max-height: 400px;
+            }
+
+            .main-content {
+                min-height: 600px;
+            }
+        }
+
+        /* 滚动条美化 */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #a8a8a8;
+        }
+
+        /* 错误提示 */
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 12px 0;
+        }
+
+        /* 加载动画 */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <div class="sidebar">
+            <h1>Qwen AI</h1>
+            <div class="version">v5.0.7 - 支持 OpenAI 标准格式</div>
+
+            <!-- API 配置 -->
+            <div class="config-section">
+                <h3>⚙️ API 配置</h3>
+                <div class="input-group">
+                    <label>API 地址</label>
+                    <input type="text" id="apiUrl" placeholder="https://your-project.deno.dev/v1" value="">
+                </div>
+                <div class="input-group">
+                    <label>API Key（可选）</label>
+                    <input type="password" id="apiKey" placeholder="留空或填写 Token">
+                </div>
+                <button class="btn btn-secondary" style="width: 100%;" onclick="testConnection()">
+                    测试连接
+                </button>
+            </div>
+
+            <!-- 模型选择 -->
+            <div class="config-section">
+                <h3>🤖 模型选择</h3>
+                <div class="model-grid">
+                    <button class="model-btn active" data-model="qwen3.6-plus" onclick="selectModel(this)">
+                        <div class="model-name">标准对话</div>
+                        <div class="model-desc">qwen3.6-plus</div>
+                    </button>
+                    <button class="model-btn" data-model="qwen3.6-plus-search" onclick="selectModel(this)">
+                        <div class="model-name">搜索增强</div>
+                        <div class="model-desc">search</div>
+                    </button>
+                    <button class="model-btn" data-model="qwen3.6-plus-thinking" onclick="selectModel(this)">
+                        <div class="model-name">思维链</div>
+                        <div class="model-desc">thinking</div>
+                    </button>
+                    <button class="model-btn" data-model="qwen3.6-plus-image" onclick="selectModel(this)">
+                        <div class="model-name">图片生成</div>
+                        <div class="model-desc">t2i</div>
+                    </button>
+                    <button class="model-btn" data-model="qwen3.6-plus-image_edit" onclick="selectModel(this)">
+                        <div class="model-name">图片编辑</div>
+                        <div class="model-desc">image_edit</div>
+                    </button>
+                    <button class="model-btn" data-model="qwen3.6-plus-video" onclick="selectModel(this)">
+                        <div class="model-name">视频生成</div>
+                        <div class="model-desc">t2v</div>
+                    </button>
+                    <button class="model-btn" data-model="qwen3.6-plus-research" onclick="selectModel(this)">
+                        <div class="model-name">深度研究</div>
+                        <div class="model-desc">research</div>
+                    </button>
+                </div>
+
+                <div class="image-size-group" id="imageSizeGroup" style="display: none;">
+                    <div class="input-group">
+                        <label>图片/视频尺寸</label>
+                        <select id="mediaSize">
+                            <option value="1:1">1:1 正方形</option>
+                            <option value="16:9">16:9 横屏</option>
+                            <option value="9:16">9:16 竖屏</option>
+                            <option value="4:3">4:3 标准</option>
+                            <option value="3:4">3:4 竖向标准</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 功能说明 -->
+            <div class="config-section">
+                <h3>📖 使用说明</h3>
+                <div style="font-size: 12px; color: #666; line-height: 1.8;">
+                    <p><strong>标准对话：</strong>普通聊天对话</p>
+                    <p><strong>搜索增强：</strong>联网搜索回答</p>
+                    <p><strong>思维链：</strong>详细推理过程</p>
+                    <p><strong>图片生成：</strong>根据文字生成图片</p>
+                    <p><strong>图片编辑：</strong>上传图片进行编辑</p>
+                    <p><strong>视频生成：</strong>根据文字生成视频</p>
+                    <p><strong>深度研究：</strong>深度分析研究</p>
+                </div>
+            </div>
+
+            <!-- 清空对话 -->
+            <button class="btn btn-secondary" style="width: 100%; margin-top: auto;" onclick="clearMessages()">
+                🗑️ 清空对话
+            </button>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="main-content">
+            <!-- 聊天区域 -->
+            <div class="chat-container">
+                <div class="chat-header">
+                    <h2>💬 对话窗口</h2>
+                    <p id="currentModel">当前模型：qwen3.6-plus（标准对话）</p>
+                </div>
+
+                <div class="messages" id="messages">
+                    <div class="message">
+                        <div class="message-header">
+                            <div class="message-avatar assistant-avatar">🤖</div>
+                            <span class="message-role">Qwen AI</span>
+                        </div>
+                        <div class="message-content">
+你好！我是 Qwen AI 助手。我可以帮你：
+• 💬 进行对话聊天
+• 🔍 联网搜索信息
+• 🧠 深度思考和推理
+• 🎨 生成和编辑图片
+• 🎬 生成短视频
+
+请在左侧配置 API 地址，然后开始对话吧！
+                        </div>
+                    </div>
+                </div>
+
+                <div class="input-container">
+                    <div class="input-wrapper">
+                        <div class="image-preview" id="imagePreview"></div>
+                        <textarea class="chat-input" id="userInput" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)" rows="1"></textarea>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn btn-secondary btn-icon" onclick="uploadImage()" title="上传图片">
+                            🖼️
+                        </button>
+                        <button class="btn btn-primary" id="sendBtn" onclick="sendMessage()">
+                            发送
+                        </button>
+                    </div>
+                </div>
+                <input type="file" id="fileInput" accept="image/*" multiple style="display: none;" onchange="handleFileSelect(event)">
+            </div>
+
+            <!-- 状态栏 -->
+            <div class="status-bar">
+                <div class="status-indicator">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">就绪</span>
+                </div>
+                <div>
+                    <span id="tokenCount">Token: 0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 全局配置
+        let config = {
+            apiUrl: '',
+            apiKey: '',
+            model: 'qwen3.6-plus',
+            messages: [],
+            uploadedImages: [],
+            isStreaming: false
+        };
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            // 从 localStorage 加载配置
+            const savedConfig = localStorage.getItem('qwenConfig');
+            if (savedConfig) {
+                const parsed = JSON.parse(savedConfig);
+                document.getElementById('apiUrl').value = parsed.apiUrl || '';
+                document.getElementById('apiKey').value = parsed.apiKey || '';
+                config.apiUrl = parsed.apiUrl || '';
+                config.apiKey = parsed.apiKey || '';
+            }
+
+            // 自动调整输入框高度
+            const input = document.getElementById('userInput');
+            input.addEventListener('input', autoResize);
+            input.addEventListener('keydown', handleKeyDown);
+        });
+
+        // 保存配置到 localStorage
+        function saveConfig() {
+            config.apiUrl = document.getElementById('apiUrl').value.trim();
+            config.apiKey = document.getElementById('apiKey').value.trim();
+            localStorage.setItem('qwenConfig', JSON.stringify({
+                apiUrl: config.apiUrl,
+                apiKey: config.apiKey
+            }));
+        }
+
+        // 测试连接
+        async function testConnection() {
+            saveConfig();
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+
+            if (!config.apiUrl) {
+                alert('请先填写 API 地址');
+                return;
+            }
+
+            statusText.textContent = '测试连接中...';
+            statusDot.classList.remove('error');
+
+            try {
+                const response = await fetch(`${config.apiUrl}/models`, {
+                    headers: config.apiKey ? { 'Authorization': `Bearer ${config.apiKey}` } : {}
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    statusText.textContent = '连接成功';
+                    statusDot.classList.remove('error');
+                    alert(`✅ 连接成功！可用模型：${data.data.map(m => m.id).join(', ')}`);
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                statusText.textContent = '连接失败';
+                statusDot.classList.add('error');
+                alert(`❌ 连接失败：${error.message}`);
+            }
+        }
+
+        // 选择模型
+        function selectModel(btn) {
+            // 移除所有 active
+            document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const model = btn.dataset.model;
+            config.model = model;
+
+            // 更新当前模型显示
+            const modelName = btn.querySelector('.model-name').textContent;
+            document.getElementById('currentModel').textContent = `当前模型：${model}（${modelName}）`;
+
+            // 显示/隐藏尺寸选择
+            const showSize = ['qwen3.6-plus-image', 'qwen3.6-plus-image_edit', 'qwen3.6-plus-video'].includes(model);
+            document.getElementById('imageSizeGroup').style.display = showSize ? 'block' : 'none';
+        }
+
+        // 上传图片
+        function uploadImage() {
+            document.getElementById('fileInput').click();
+        }
+
+        // 处理文件选择
+        function handleFileSelect(event) {
+            const files = event.target.files;
+            const preview = document.getElementById('imagePreview');
+
+            for (const file of files) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const base64 = e.target.result;
+                    config.uploadedImages.push(base64);
+
+                    const item = document.createElement('div');
+                    item.className = 'image-preview-item';
+                    item.innerHTML = `
+                        <img src="${base64}" alt="preview">
+                        <button onclick="removeImage(${config.uploadedImages.length - 1}, this)">×</button>
+                    `;
+                    preview.appendChild(item);
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        // 移除图片
+        function removeImage(index, btn) {
+            config.uploadedImages.splice(index, 1);
+            btn.parentElement.remove();
+        }
+
+        // 自动调整输入框高度
+        function autoResize() {
+            const input = document.getElementById('userInput');
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+        }
+
+        // 处理按键
+        function handleKeyDown(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+
+        // 发送消息
+        async function sendMessage() {
+            const input = document.getElementById('userInput');
+            const message = input.value.trim();
+
+            if (!message && config.uploadedImages.length === 0) return;
+            if (config.isStreaming) return;
+
+            saveConfig();
+
+            if (!config.apiUrl) {
+                alert('请先配置 API 地址');
+                return;
+            }
+
+            // 构建用户消息
+            let userContent;
+            if (config.uploadedImages.length > 0 && config.model.includes('image')) {
+                userContent = [
+                    { type: 'text', text: message || '请处理这张图片' },
+                    ...config.uploadedImages.map(url => ({
+                        type: 'image_url',
+                        image_url: { url }
+                    }))
+                ];
+            } else {
+                userContent = message;
+            }
+
+            // 添加用户消息到界面
+            addMessage('user', message || '(上传了图片)', config.uploadedImages);
+            config.messages.push({ role: 'user', content: userContent });
+
+            // 清空输入
+            input.value = '';
+            input.style.height = 'auto';
+            config.uploadedImages = [];
+            document.getElementById('imagePreview').innerHTML = '';
+
+            // 发送请求
+            await sendRequest();
+        }
+
+        // 发送 API 请求
+        async function sendRequest() {
+            const statusText = document.getElementById('statusText');
+            const sendBtn = document.getElementById('sendBtn');
+
+            config.isStreaming = true;
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = '<span class="spinner"></span>';
+            statusText.textContent = '请求中...';
+
+            try {
+                const requestBody = {
+                    model: config.model,
+                    messages: config.messages,
+                    stream: true
+                };
+
+                // 添加尺寸参数
+                if (['qwen3.6-plus-image', 'qwen3.6-plus-image_edit', 'qwen3.6-plus-video'].includes(config.model)) {
+                    requestBody.size = document.getElementById('mediaSize').value;
+                }
+
+                const headers = {
+                    'Content-Type': 'application/json'
+                };
+                if (config.apiKey) {
+                    headers['Authorization'] = `Bearer ${config.apiKey}`;
+                }
+
+                const response = await fetch(`${config.apiUrl}/chat/completions`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(`API 错误 (${response.status}): ${error}`);
+                }
+
+                // 创建助手消息占位
+                const assistantMessage = addMessage('assistant', '', null, true);
+
+                // 处理流式响应
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let fullContent = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
+
+                    for (const line of lines) {
+                        const data = line.replace('data: ', '').trim();
+                        if (data === '[DONE]') continue;
+
+                        try {
+                            const json = JSON.parse(data);
+                            const content = json.choices?.[0]?.delta?.content || '';
+                            if (content) {
+                                fullContent += content;
+                                assistantMessage.querySelector('.message-content').textContent = fullContent;
+                                scrollToBottom();
+                            }
+                        } catch (e) {
+                            // 忽略解析错误
+                        }
+                    }
+                }
+
+                // 检查是否是图片/视频链接
+                if (fullContent.includes('http') && (fullContent.includes('.jpg') || fullContent.includes('.png') || fullContent.includes('.mp4'))) {
+                    const urls = fullContent.match(/https?:\/\/[^\s]+/g);
+                    if (urls) {
+                        const container = assistantMessage.querySelector('.message-content');
+                        container.innerHTML = fullContent;
+                        urls.forEach(url => {
+                            if (url.includes('.mp4')) {
+                                container.innerHTML += `<video controls src="${url}"></video>`;
+                            } else {
+                                container.innerHTML += `<img src="${url}" alt="Generated image">`;
+                            }
+                        });
+                    }
+                }
+
+                // 保存到消息历史
+                config.messages.push({ role: 'assistant', content: fullContent });
+                statusText.textContent = '完成';
+
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage('assistant', `❌ 错误：${error.message}`, null, false, true);
+                document.getElementById('statusDot').classList.add('error');
+                statusText.textContent = '请求失败';
+            } finally {
+                config.isStreaming = false;
+                sendBtn.disabled = false;
+                sendBtn.textContent = '发送';
+            }
+        }
+
+        // 添加消息到界面
+        function addMessage(role, content, images = null, loading = false, error = false) {
+            const messagesDiv = document.getElementById('messages');
+            const message = document.createElement('div');
+            message.className = 'message';
+
+            const isUser = role === 'user';
+            const avatar = isUser ? '👤' : '🤖';
+            const avatarClass = isUser ? 'user-avatar' : 'assistant-avatar';
+            const roleName = isUser ? '你' : 'Qwen AI';
+
+            let contentHtml = content;
+            if (images && images.length > 0) {
+                contentHtml = `<p>${content}</p>`;
+                images.forEach(img => {
+                    contentHtml += `<img src="${img}" alt="uploaded image">`;
+                });
+            }
+
+            message.innerHTML = `
+                <div class="message-header">
+                    <div class="message-avatar ${avatarClass}">${avatar}</div>
+                    <span class="message-role">${roleName}</span>
+                </div>
+                <div class="message-content ${loading ? 'loading' : ''} ${error ? 'error-message' : ''}">${contentHtml}</div>
+            `;
+
+            messagesDiv.appendChild(message);
+            scrollToBottom();
+
+            return message;
+        }
+
+        // 滚动到底部
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // 清空对话
+        function clearMessages() {
+            if (confirm('确定要清空所有对话吗？')) {
+                config.messages = [];
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.innerHTML = `
+                    <div class="message">
+                        <div class="message-header">
+                            <div class="message-avatar assistant-avatar">🤖</div>
+                            <span class="message-role">Qwen AI</span>
+                        </div>
+                        <div class="message-content">
+对话已清空。开始新的对话吧！
+                        </div>
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>
