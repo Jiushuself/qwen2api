@@ -1,8 +1,8 @@
 /**
  * Qwen API to OpenAI Standard - Single File Deno Deploy/Playground Script
  *
- * @version 5.0.7
- * @description 完全按照官方 payload + 极强诊断日志（解决空回复）
+ * @version 5.0.8
+ * @description 完全按照官方 payload + CORS 支持 + 搜索模式修复
  */
 
 import {
@@ -364,7 +364,7 @@ const authMiddleware: Middleware = async (ctx, next) => {
 app.use(authMiddleware);
 
 router.get("/", (ctx) => {
-	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.0.7</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.0.7 已开启极强诊断日志</p><p>请设置 DEBUG=true 后测试</p></body></html>`;
+	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.0.8</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.0.8 已开启 CORS 支持</p><p>API 文档请参考 README</p></body></html>`;
 	ctx.response.body = html;
 	ctx.response.headers.set("Content-Type", "text/html");
 });
@@ -422,12 +422,12 @@ const handleChatCompletions = async (ctx: Context) => {
 router.post("/v1/chat/completions", handleChatCompletions);
 router.post("/chat/completions", handleChatCompletions);
 
-router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.0.7" }; });
+router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.0.8" }; });
 
 app.use(router.routes());
 app.use(router.allowedMethods());
 
 app.use((ctx) => { ctx.response.status = 404; ctx.response.body = { error: "Not Found" }; });
 
-console.log("🚀 Qwen Proxy v5.0.7 启动");
+console.log("🚀 Qwen Proxy v5.0.8 启动");
 Deno.serve((req) => app.handle(req));
