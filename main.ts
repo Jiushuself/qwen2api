@@ -1,8 +1,8 @@
 /**
  * Qwen API to OpenAI Standard - Single File Deno Deploy/Playground Script
  *
- * @version 5.0.8
- * @description 完全按照官方 payload + CORS 支持 + 搜索模式修复 + 工具调用支持
+ * @version 5.0.9
+ * @description 完全按照官方 payload + CORS 支持 + 搜索模式修复 + 增强工具调用支持
  */
 
 import {
@@ -66,6 +66,13 @@ type ParsedToolCall = {
 	input: any;
 };
 
+type InferredIntent = "read" | "create" | "delete" | "run" | "edit" | "unknown";
+
+type PathHints = {
+	homeHint?: string;
+	knownPaths: string[];
+};
+
 function normalizeOpenAITools(tools: any[]): OpenAITool[] {
 	if (!Array.isArray(tools)) return [];
 	return tools
@@ -101,7 +108,25 @@ function safeJsonParse(input: string, fallback: any) {
 	}
 }
 
-function buildPromptWithTools(messages: any[], tools: OpenAITool[]): string {
+function normalizeToolArguments(argumentsText: string): any {
+	if (!argumentsText) return {};
+	const parsed = safeJsonParse(argumentsText, null);
+	if (parsed && typeof parsed === "object") return parsed;
+	return { raw: argumentsText };
+}
+
+function resolveForcedToolName(toolChoice: any): string | null {
+	if (!toolChoice) return null;
+	if (typeof toolChoice === "string") {
+		if (toolChoice === "none" || toolChoice === "auto" || toolChoice === "required") return null;
+	}
+	if (typeof toolChoice === "object") {
+		return toolChoice?.function?.name || null;
+	}
+	return null;
+}
+
+function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolName?: string | null): string {
 	const lines: string[] = [];
 	let systemPrompt = "You are a helpful assistant.";
 
@@ -121,14 +146,26 @@ function buildPromptWithTools(messages: any[], tools: OpenAITool[]): string {
 			description: t.function?.description || "",
 			parameters: t.function?.parameters || { type: "object", properties: {} },
 		}));
+		const normalizedForcedTool = forcedToolName && toolSpec.some((t) => t.name === forcedToolName)
+			? forcedToolName
+			: null;
 		lines.push(
 			"[Tools]\n" +
 			JSON.stringify(toolSpec, null, 2) +
 			"\n[/Tools]\n" +
 			"If a tool is needed, output exactly one tool call block in this format:\n" +
 			"##TOOL_CALL##\n{\"name\":\"tool_name\",\"input\":{...}}\n##END_CALL##\n" +
-			"Do not add markdown fences around the JSON."
+			"Do not add markdown fences around the JSON.\n" +
+			"Never claim a listed tool does not exist; choose only from the listed tools."
 		);
+		if (normalizedForcedTool) {
+			lines.push(
+				"[ToolChoice]\n" +
+				`You MUST call this tool now: ${normalizedForcedTool}.` +
+				"\nReturn only the tool call block; do not output normal assistant text.\n" +
+				"[/ToolChoice]"
+			);
+		}
 	}
 
 	for (const msg of messages || []) {
@@ -197,6 +234,238 @@ function parseToolCallsFromText(answer: string): ParsedToolCall[] {
 	}
 
 	return blocks;
+}
+
+function collectPathHintsFromMessages(messages: any[]): PathHints {
+	const pathSet = new Set<string>();
+	for (const msg of messages || []) {
+		const raw = typeof msg?.content === "string"
+			? msg.content
+			: Array.isArray(msg?.content)
+				? msg.content.map((x: any) => (x?.type === "text" ? x?.text || "" : "")).join("\n")
+				: "";
+		const text = String(raw || "");
+		const matches = text.match(/\/(?:[^\s"'`<>]+\/)*[^\s"'`<>]+/g) || [];
+		for (const p of matches) pathSet.add(p);
+	}
+	const knownPaths = Array.from(pathSet);
+	const homeFromKnown = knownPaths
+		.map((p) => p.match(/^(\/home\/[^\/]+)/)?.[1] || "")
+		.find(Boolean);
+	return { homeHint: homeFromKnown || undefined, knownPaths };
+}
+
+function extractPathFromText(text: string, hints?: PathHints): string | null {
+	const input = (text || "").trim();
+	if (!input) return null;
+	const knownPaths = hints?.knownPaths || [];
+	const home = hints?.homeHint;
+	const tilde = input.match(/~\/[^\s"'`]+/);
+	if (tilde?.[0]) {
+		if (home) return `${home}/${tilde[0].slice(2)}`;
+		const tail = `/${tilde[0].slice(2)}`;
+		const hit = knownPaths.find((p) => p.endsWith(tail));
+		if (hit) return hit;
+		return null;
+	}
+	const abs = input.match(/\/(?:[^\s"'`]+\/)*[^\s"'`]+/);
+	if (abs?.[0]) return abs[0];
+	const rel = input.match(/(?:\.\/)?[A-Za-z0-9_.\-\/]+\.[A-Za-z0-9_\-]+/);
+	if (rel?.[0]) return rel[0].replace(/^\.\//, "");
+	if (/(\.bashrc|bashrc)/i.test(input)) {
+		const knownBashrc = knownPaths.find((p) => p.endsWith("/.bashrc"));
+		if (knownBashrc) return knownBashrc;
+		if (home) return `${home}/.bashrc`;
+	}
+	return null;
+}
+
+function inferIntentFromText(text: string): InferredIntent {
+	const lower = (text || "").toLowerCase();
+	if (!lower) return "unknown";
+	if (/(read|show|view|open|cat|读取|阅读|查看|打开|显示)/.test(lower)) return "read";
+	if (/(create|new|touch|mk|write file|创建|新建)/.test(lower)) return "create";
+	if (/(delete|remove|rm|unlink|删除|移除|删掉)/.test(lower)) return "delete";
+	if (/(edit|modify|update|replace|修改|编辑|替换)/.test(lower)) return "edit";
+	if (/(run|execute|bash|shell|cmd|命令|执行)/.test(lower)) return "run";
+	return "unknown";
+}
+
+function getToolSchema(tool: OpenAITool): any {
+	return tool?.function?.parameters && typeof tool.function.parameters === "object"
+		? tool.function.parameters
+		: { type: "object", properties: {} };
+}
+
+function getToolRequiredKeys(tool: OpenAITool): string[] {
+	const schema = getToolSchema(tool);
+	return Array.isArray(schema?.required) ? schema.required : [];
+}
+
+function getToolPropertyMap(tool: OpenAITool): Record<string, any> {
+	const schema = getToolSchema(tool);
+	return schema?.properties && typeof schema.properties === "object" ? schema.properties : {};
+}
+
+function pickFirstKey(keys: string[], re: RegExp): string | null {
+	for (const key of keys) {
+		if (re.test(key)) return key;
+	}
+	return null;
+}
+
+function escapeRegExp(input: string): string {
+	return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildArgsForTool(tool: OpenAITool, intent: InferredIntent, userText: string, hints?: PathHints): any {
+	const props = getToolPropertyMap(tool);
+	const required = getToolRequiredKeys(tool);
+	const keys = Object.keys(props);
+	const lowerText = (userText || "").toLowerCase();
+	const path = extractPathFromText(userText, hints);
+	const args: Record<string, any> = {};
+
+	const pathKey = pickFirstKey(keys, /(filepath|file_path|path|filename|file|target)/i);
+	const contentKey = pickFirstKey(keys, /(content|text|body|data)/i);
+	const commandKey = pickFirstKey(keys, /(command|cmd|script)/i);
+	const descriptionKey = pickFirstKey(keys, /(description|desc|reason)/i);
+
+	if (path && pathKey) args[pathKey] = path;
+
+	if (intent === "delete" && commandKey && path) {
+		const escaped = path.replace(/"/g, '\\"');
+		args[commandKey] = `rm -f "${escaped}"`;
+	}
+
+	if ((intent === "create" || intent === "edit") && contentKey && args[contentKey] === undefined) {
+		args[contentKey] = "";
+	}
+
+	if (descriptionKey && args[descriptionKey] === undefined) {
+		if (intent === "delete" && path) args[descriptionKey] = `Delete file ${path}`;
+		else if (intent === "read" && path) args[descriptionKey] = `Read file ${path}`;
+		else if (intent === "create" && path) args[descriptionKey] = `Create file ${path}`;
+		else if (intent === "run") args[descriptionKey] = "Run command";
+	}
+
+	if (commandKey && args[commandKey] === undefined && intent === "run") {
+		if (/\bls\b|list|目录|文件列表/.test(lowerText)) args[commandKey] = "ls";
+		else if (/\bpwd\b|当前目录/.test(lowerText)) args[commandKey] = "pwd";
+	}
+
+	for (const key of required) {
+		if (args[key] !== undefined) continue;
+		const def = props[key] || {};
+		const type = def?.type;
+		if (type === "string") args[key] = "";
+		else if (type === "number" || type === "integer") args[key] = 0;
+		else if (type === "boolean") args[key] = false;
+		else if (type === "array") args[key] = [];
+		else args[key] = {};
+	}
+
+	return args;
+}
+
+function scoreToolForIntent(tool: OpenAITool, intent: InferredIntent, userText: string, hints?: PathHints): number {
+	const name = (tool?.function?.name || "").toLowerCase();
+	const desc = (tool?.function?.description || "").toLowerCase();
+	const text = (userText || "").toLowerCase();
+	const props = Object.keys(getToolPropertyMap(tool)).join(" ").toLowerCase();
+	let score = 0;
+
+	if (name && new RegExp(`\\b${escapeRegExp(name)}\\b`, "i").test(text)) score += 8;
+
+	if (intent === "read" && /(read|view|open|cat|读取|查看)/.test(`${name} ${desc} ${props}`)) score += 6;
+	if (intent === "create" && /(write|create|new|touch|创建|新建)/.test(`${name} ${desc} ${props}`)) score += 6;
+	if (intent === "delete" && /(delete|remove|rm|bash|shell|删除|移除)/.test(`${name} ${desc} ${props}`)) score += 6;
+	if (intent === "edit" && /(edit|modify|update|replace|修改|编辑)/.test(`${name} ${desc} ${props}`)) score += 6;
+	if (intent === "run" && /(bash|shell|command|exec|run|执行|命令)/.test(`${name} ${desc} ${props}`)) score += 6;
+
+	if (intent === "create") {
+		if (name === "write") score += 12;
+		if (name === "edit") score -= 10;
+	}
+	if (intent === "edit" && name === "edit") score += 8;
+
+	if (extractPathFromText(userText, hints) && /(filepath|file_path|path|filename|file|target)/.test(props)) score += 3;
+
+	return score;
+}
+
+function findToolByName(tools: OpenAITool[], name: string): OpenAITool | null {
+	for (const tool of tools || []) {
+		if (tool?.function?.name === name) return tool;
+	}
+	return null;
+}
+
+function normalizeParsedToolCalls(calls: ParsedToolCall[], tools: OpenAITool[], userText: string, hints?: PathHints): ParsedToolCall[] {
+	if (!Array.isArray(calls) || calls.length === 0) return [];
+	const intent = inferIntentFromText(userText);
+	const writeTool = findToolByName(tools, "write");
+	const editTool = findToolByName(tools, "edit");
+	const allowedToolNames = new Set((tools || []).map((t) => t?.function?.name).filter(Boolean) as string[]);
+
+	const normalized = calls.map((call) => {
+		const callName = call?.name || "";
+		const input = call?.input && typeof call.input === "object" ? { ...call.input } : {};
+		const filePath = input.filePath || input.path || extractPathFromText(userText, hints) || "";
+
+		if (intent === "create" && callName === "edit" && writeTool) {
+			const writeArgs = buildArgsForTool(writeTool, "create", userText, hints);
+			if (filePath && writeArgs.filePath === undefined) writeArgs.filePath = filePath;
+			if (writeArgs.content === undefined) writeArgs.content = String(input.newString ?? "");
+			return { ...call, name: "write", input: writeArgs };
+		}
+
+		if (callName === "write" && writeTool) {
+			if (!input.filePath && filePath) input.filePath = filePath;
+			if (input.content === undefined) input.content = "";
+			return { ...call, input };
+		}
+
+		if (callName === "edit" && editTool) {
+			if (!input.filePath && filePath) input.filePath = filePath;
+			if (input.oldString === undefined) input.oldString = "";
+			if (input.newString === undefined) input.newString = "";
+			return { ...call, input };
+		}
+
+		return call;
+	});
+
+	const validCalls = normalized.filter((c) => allowedToolNames.has(c.name));
+	if (validCalls.length > 0) return validCalls;
+
+	const inferred = inferToolCallFromIntent(userText, tools, hints);
+	return inferred ? [inferred] : [];
+}
+
+function inferToolCallFromIntent(userText: string, tools: OpenAITool[], hints?: PathHints): ParsedToolCall | null {
+	const text = (userText || "").trim();
+	if (!text || !Array.isArray(tools) || tools.length === 0) return null;
+
+	const intent = inferIntentFromText(text);
+	const scored = tools
+		.map((tool) => ({ tool, score: scoreToolForIntent(tool, intent, text, hints) }))
+		.sort((a, b) => b.score - a.score);
+
+	const best = scored[0];
+	if (!best || best.score <= 0 || !best.tool?.function?.name) return null;
+
+	const args = buildArgsForTool(best.tool, intent, text, hints);
+	const required = getToolRequiredKeys(best.tool);
+	const allRequiredPresent = required.every((k) => args[k] !== undefined);
+	if (!allRequiredPresent) return null;
+	if ((intent === "read" || intent === "create" || intent === "delete") && !extractPathFromText(text, hints)) return null;
+
+	return {
+		id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+		name: best.tool.function.name,
+		input: args,
+	};
 }
 
 function parseOpenAIStreamToCompletion(rawSseText: string, model: string) {
@@ -368,6 +637,7 @@ async function transformOpenAIRequestToQwen(openAIRequest: any, token: string, s
 	const qwenModel = model.replace(/-(search|thinking|image|image_edit|video|research)$/, "");
 	const tools = normalizeOpenAITools(openAIRequest?.tools || []);
 	const hasCustomTools = tools.length > 0;
+	const forcedToolName = resolveForcedToolName(openAIRequest?.tool_choice);
 	const thinkingEnabled = hasCustomTools ? false : model.includes("-thinking");
 
 	const isResearch = resolvedType === "deep_research";
@@ -375,6 +645,17 @@ async function transformOpenAIRequestToQwen(openAIRequest: any, token: string, s
 
 	const allMessages = Array.isArray(openAIRequest?.messages) ? openAIRequest.messages : [];
 	const lastUser = allMessages.filter((m: any) => m.role === "user").pop() || { content: "" };
+	const lastTool = allMessages.filter((m: any) => m.role === "tool").pop() || { content: "" };
+	const lastAssistant = allMessages.filter((m: any) => m.role === "assistant" && Array.isArray(m?.tool_calls) && m.tool_calls.length > 0).pop() || { tool_calls: [] };
+	const lastUserText = extractTextContent(lastUser?.content);
+	const lastToolResultText = extractTextContent(lastTool?.content) || (typeof lastTool?.content === "string" ? lastTool.content : "");
+	const lastAssistantToolName = lastAssistant?.tool_calls?.[0]?.function?.name || "";
+	const lastAssistantToolArgsText = typeof lastAssistant?.tool_calls?.[0]?.function?.arguments === "string"
+		? lastAssistant.tool_calls[0].function.arguments
+		: JSON.stringify(lastAssistant?.tool_calls?.[0]?.function?.arguments || {});
+	const lastMessageRole = String(allMessages[allMessages.length - 1]?.role || "");
+	const hadRecentToolSuccess = lastMessageRole === "tool" && !!lastToolResultText && !/(file\s+not\s+found|permission\s+denied|not\s+found|failed|error|unexpected\s+eof)/i.test(lastToolResultText);
+	const pathHints = collectPathHintsFromMessages(allMessages);
 
 	let chatTypeForCreation = resolvedType;
 	if (resolvedType === "image_edit") {
@@ -415,7 +696,7 @@ async function transformOpenAIRequestToQwen(openAIRequest: any, token: string, s
 	let text = "";
 	const files: any[] = [];
 	if (hasCustomTools) {
-		text = buildPromptWithTools(allMessages, tools);
+		text = buildPromptWithTools(allMessages, tools, forcedToolName);
 	} else if (typeof lastUser.content === "string") text = lastUser.content;
 	else if (Array.isArray(lastUser.content)) {
 		for (const i of lastUser.content) {
@@ -454,14 +735,34 @@ async function transformOpenAIRequestToQwen(openAIRequest: any, token: string, s
 		};
 	}
 
-	return { request: req, chatId, isVideo: false, shouldAutoDelete: useTemp, hasCustomTools };
+	return { request: req, chatId, isVideo: false, shouldAutoDelete: useTemp, hasCustomTools, forcedToolName, lastUserText, lastToolResultText, lastAssistantToolName, lastAssistantToolArgsText, lastMessageRole, hadRecentToolSuccess, pathHints, tools };
 }
 
 function createQwenToOpenAIStreamTransformer(options?: {
 	hasCustomTools?: boolean;
+	forcedToolName?: string | null;
+	fallbackUserText?: string;
+	fallbackTools?: OpenAITool[];
+	lastToolResultText?: string;
+	lastAssistantToolName?: string;
+	lastAssistantToolArgsText?: string;
+	lastMessageRole?: string;
+	hadRecentToolSuccess?: boolean;
+	pathHints?: PathHints;
 	onComplete?: () => void | Promise<void>;
 }) {
 	const hasCustomTools = !!options?.hasCustomTools;
+	const forcedToolName = options?.forcedToolName || null;
+	const fallbackUserText = options?.fallbackUserText || "";
+	const fallbackTools = options?.fallbackTools || [];
+	const lastToolResultText = options?.lastToolResultText || "";
+	const lastAssistantToolName = options?.lastAssistantToolName || "";
+	const lastAssistantToolArgsText = options?.lastAssistantToolArgsText || "";
+	const lastMessageRole = options?.lastMessageRole || "";
+	const hadRecentToolSuccess = !!options?.hadRecentToolSuccess;
+	const pathHints = options?.pathHints || { knownPaths: [] };
+	const hadToolError = /(file\s+not\s+found|permission\s+denied|not\s+found|failed|error)/i.test(lastToolResultText);
+	const lastArgs = normalizeToolArguments(lastAssistantToolArgsText);
 	const onComplete = options?.onComplete;
 	const decoder = new TextDecoder();
 	const encoder = new TextEncoder();
@@ -507,6 +808,53 @@ function createQwenToOpenAIStreamTransformer(options?: {
 
 		if (parsedCalls.length === 0 && answerText.trim()) {
 			parsedCalls = parseToolCallsFromText(answerText);
+		}
+
+		if (parsedCalls.length > 0 && hasCustomTools) {
+			parsedCalls = normalizeParsedToolCalls(parsedCalls, fallbackTools, fallbackUserText, pathHints);
+		}
+
+		if (parsedCalls.length === 0 && hasCustomTools) {
+			const looksLikeMissingToolText = /tool\s+\w+\s+does\s+not\s+exists?/i.test(answerText);
+			const shouldInferByEmpty = !answerText.trim() && lastMessageRole === "user" && !hadRecentToolSuccess;
+			if (looksLikeMissingToolText || shouldInferByEmpty) {
+				const inferred = inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints);
+				if (inferred) {
+					const sameFailedCall = hadToolError &&
+						!!lastAssistantToolName &&
+						inferred.name === lastAssistantToolName &&
+						JSON.stringify(inferred.input ?? {}) === JSON.stringify(lastArgs ?? {});
+					const sameAsLastCall = !!lastAssistantToolName &&
+						inferred.name === lastAssistantToolName &&
+						JSON.stringify(inferred.input ?? {}) === JSON.stringify(lastArgs ?? {});
+					if (!sameFailedCall && !(lastMessageRole === "tool" && sameAsLastCall)) {
+						parsedCalls = [inferred];
+					}
+				}
+			}
+		}
+
+		if (parsedCalls.length === 0 && hasCustomTools && forcedToolName) {
+			const forcedExists = fallbackTools.some((t) => t?.function?.name === forcedToolName);
+			if (forcedExists) {
+				parsedCalls = [{
+					id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+					name: forcedToolName,
+					input: {},
+				}];
+			}
+		}
+
+		if (parsedCalls.length > 0 && hasCustomTools) {
+			parsedCalls = normalizeParsedToolCalls(parsedCalls, fallbackTools, fallbackUserText, pathHints);
+		}
+
+		if (hasCustomTools && lastMessageRole === "tool" && parsedCalls.length > 0) {
+			parsedCalls = parsedCalls.filter((tc) => !(
+				!!lastAssistantToolName &&
+				tc.name === lastAssistantToolName &&
+				JSON.stringify(tc.input ?? {}) === JSON.stringify(lastArgs ?? {})
+			));
 		}
 
 		if (hasCustomTools && parsedCalls.length > 0) {
@@ -678,7 +1026,7 @@ const authMiddleware: Middleware = async (ctx, next) => {
 app.use(authMiddleware);
 
 router.get("/", (ctx) => {
-	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.0.8</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.0.8 支持工具调用（Function Calling）</p><p>API 文档请参考 README</p></body></html>`;
+	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.0.9</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.0.9 支持增强工具调用（Function Calling）</p><p>API 文档请参考 README</p></body></html>`;
 	ctx.response.body = html;
 	ctx.response.headers.set("Content-Type", "text/html");
 });
@@ -697,7 +1045,7 @@ const handleChatCompletions = async (ctx: Context) => {
 
 	try {
 		const openAIRequest = await ctx.request.body({ type: "json" }).value;
-		const { request: qwenRequest, chatId, isVideo, shouldAutoDelete, hasCustomTools } = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
+		const { request: qwenRequest, chatId, isVideo, shouldAutoDelete, hasCustomTools, forcedToolName, lastUserText, lastToolResultText, lastAssistantToolName, lastAssistantToolArgsText, lastMessageRole, hadRecentToolSuccess, pathHints, tools } = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
 		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" };
@@ -723,7 +1071,19 @@ const handleChatCompletions = async (ctx: Context) => {
 
 		const onComplete = shouldAutoDelete ? async () => { if (chatId) await deleteChat(chatId, token); } : undefined;
 
-		const transformed = upstream.body!.pipeThrough(createQwenToOpenAIStreamTransformer({ hasCustomTools, onComplete }));
+		const transformed = upstream.body!.pipeThrough(createQwenToOpenAIStreamTransformer({
+			hasCustomTools,
+			forcedToolName,
+			fallbackUserText: lastUserText,
+			lastToolResultText,
+			lastAssistantToolName,
+			lastAssistantToolArgsText,
+			lastMessageRole,
+			hadRecentToolSuccess,
+			pathHints,
+			fallbackTools: tools,
+			onComplete,
+		}));
 
 		if (openAIRequest?.stream === false) {
 			const rawSseText = await new Response(transformed).text();
@@ -743,12 +1103,12 @@ const handleChatCompletions = async (ctx: Context) => {
 router.post("/v1/chat/completions", handleChatCompletions);
 router.post("/chat/completions", handleChatCompletions);
 
-router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.0.8" }; });
+router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.0.9" }; });
 
 app.use(router.routes());
 app.use(router.allowedMethods());
 
 app.use((ctx) => { ctx.response.status = 404; ctx.response.body = { error: "Not Found" }; });
 
-console.log("🚀 Qwen Proxy v5.0.8 启动 - 支持工具调用");
+console.log("🚀 Qwen Proxy v5.0.9 启动 - 支持增强工具调用");
 Deno.serve((req) => app.handle(req));
