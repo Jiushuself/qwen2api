@@ -78,6 +78,8 @@ const UNIX_PATH_REGEX = /\/(?:[^\s"'`<>]+\/)*[^\s"'`<>]+/g;
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
 	read: ["view", "cat", "open_file"],
 	list: ["ls", "dir", "tree"],
+	glob: ["find_files", "file_search"],
+	grep: ["search_files", "ripgrep"],
 	bash: ["run", "shell", "exec", "command"],
 	apply_patch: ["patch"],
 	edit: ["multiedit", "str_replace_editor"],
@@ -499,6 +501,117 @@ function syncKnownArgumentAliases(input: Record<string, any>, tool: OpenAITool |
 	return input;
 }
 
+function inferIntentFromToolName(toolName: string): InferredIntent {
+	switch ((toolName || "").toLowerCase()) {
+		case "read":
+			return "read";
+		case "write":
+			return "create";
+		case "edit":
+		case "apply_patch":
+			return "edit";
+		case "list":
+			return "list";
+		case "glob":
+		case "grep":
+			return "search";
+		case "bash":
+			return "run";
+		default:
+			return "unknown";
+	}
+}
+
+function applyToolSpecificDefaults(tool: OpenAITool | null, toolName: string, args: Record<string, any>, userText: string) {
+	if (!tool) return args;
+
+	const keys = Object.keys(getToolPropertyMap(tool));
+	const lowerToolName = (toolName || "").toLowerCase();
+	const commandKey = pickFirstKey(keys, /(command|cmd|script)/i);
+	const patternKey = pickFirstKey(keys, /(pattern|glob|query|search|regex)/i);
+	const pathKey = pickFirstKey(keys, /(filepath|file_path|path|filename|file|target)/i);
+	const lowerText = (userText || "").toLowerCase();
+
+	if (lowerToolName === "bash" && commandKey && !String(args[commandKey] ?? "").trim()) {
+		args[commandKey] = /目录|文件|list|tree|structure|project/.test(lowerText) ? "ls" : "pwd";
+	}
+
+	if (lowerToolName === "glob" && patternKey && !String(args[patternKey] ?? "").trim()) {
+		args[patternKey] = "**/*";
+	}
+
+	if (lowerToolName === "grep" && patternKey && !String(args[patternKey] ?? "").trim()) {
+		args[patternKey] = "(TODO|FIXME|README|package.json|deno.json)";
+	}
+
+	if (lowerToolName === "list" && pathKey && !String(args[pathKey] ?? "").trim()) {
+		args[pathKey] = ".";
+	}
+
+	syncKnownArgumentAliases(args, tool);
+	return args;
+}
+
+function inferToolCallFromToolName(toolName: string, userText: string, tools: OpenAITool[], hints?: PathHints): ParsedToolCall | null {
+	const normalizedName = findAllowedToolName(tools, toolName);
+	const tool = findToolByName(tools, normalizedName);
+	if (!tool?.function?.name) return null;
+
+	const intent = inferIntentFromToolName(normalizedName);
+	const args = applyToolSpecificDefaults(tool, normalizedName, buildArgsForTool(tool, intent, userText, hints), userText);
+	const required = getToolRequiredKeys(tool);
+	const allRequiredPresent = required.every((k) => args[k] !== undefined);
+	if (!allRequiredPresent) return null;
+
+	return {
+		id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+		name: tool.function.name,
+		input: args,
+	};
+}
+
+function extractMissingToolNames(answerText: string): string[] {
+	const names: string[] = [];
+	const re = /tool\s+([a-zA-Z0-9_\-]+)\s+does\s+not\s+exists?/gi;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(answerText || "")) !== null) {
+		if (m[1]) names.push(m[1]);
+	}
+	return names;
+}
+
+function inferProjectExplorationToolCall(userText: string, tools: OpenAITool[], hints?: PathHints): ParsedToolCall | null {
+	const path = extractPathFromText(userText, hints);
+	if (path) {
+		for (const name of ["read", "list", "glob", "bash"]) {
+			const inferred = inferToolCallFromToolName(name, userText, tools, hints);
+			if (inferred) return inferred;
+		}
+		return null;
+	}
+
+	for (const name of ["list", "glob", "read", "bash"]) {
+		const inferred = inferToolCallFromToolName(name, userText, tools, hints);
+		if (inferred) return inferred;
+	}
+	return null;
+}
+
+function inferToolCallFromMissingToolText(answerText: string, userText: string, tools: OpenAITool[], hints?: PathHints): ParsedToolCall | null {
+	const mentioned = extractMissingToolNames(answerText);
+	for (const rawName of mentioned) {
+		const inferred = inferToolCallFromToolName(rawName, userText, tools, hints);
+		if (inferred) return inferred;
+	}
+	return inferProjectExplorationToolCall(userText, tools, hints);
+}
+
+function sanitizeToolComplaintText(answerText: string): string {
+	return String(answerText || "")
+		.replace(/tool\s+[a-zA-Z0-9_\-]+\s+does\s+not\s+exists?\.?\s*/gi, "")
+		.trim();
+}
+
 function normalizeParsedToolCalls(calls: ParsedToolCall[], tools: OpenAITool[], userText: string, hints?: PathHints): ParsedToolCall[] {
 	if (!Array.isArray(calls) || calls.length === 0) return [];
 	const intent = inferIntentFromText(userText);
@@ -509,7 +622,9 @@ function normalizeParsedToolCalls(calls: ParsedToolCall[], tools: OpenAITool[], 
 	const normalized = calls.map((call) => {
 		const callName = findAllowedToolName(tools, call?.name || "");
 		const baseTool = findToolByName(tools, callName);
-		const baseArgs = baseTool ? buildArgsForTool(baseTool, intent, userText, hints) : {};
+		const baseArgs = baseTool
+			? applyToolSpecificDefaults(baseTool, callName, buildArgsForTool(baseTool, intent, userText, hints), userText)
+			: {};
 		const input = call?.input && typeof call.input === "object" ? { ...baseArgs, ...call.input } : { ...baseArgs };
 		syncKnownArgumentAliases(input, baseTool);
 		const filePath = input.filePath || input.file_path || input.path || extractPathFromText(userText, hints) || "";
@@ -570,14 +685,21 @@ function inferToolCallFromIntent(userText: string, tools: OpenAITool[], hints?: 
 	if (!text || !Array.isArray(tools) || tools.length === 0) return null;
 
 	const intent = inferIntentFromText(text);
+	if (intent === "unknown") {
+		const exploration = inferProjectExplorationToolCall(text, tools, hints);
+		if (exploration) return exploration;
+	}
+
 	const scored = tools
 		.map((tool) => ({ tool, score: scoreToolForIntent(tool, intent, text, hints) }))
 		.sort((a, b) => b.score - a.score);
 
 	const best = scored[0];
-	if (!best || best.score <= 0 || !best.tool?.function?.name) return null;
+	if (!best || best.score <= 0 || !best.tool?.function?.name) {
+		return inferProjectExplorationToolCall(text, tools, hints);
+	}
 
-	const args = buildArgsForTool(best.tool, intent, text, hints);
+	const args = applyToolSpecificDefaults(best.tool, best.tool.function.name || "", buildArgsForTool(best.tool, intent, text, hints), text);
 	const required = getToolRequiredKeys(best.tool);
 	const allRequiredPresent = required.every((k) => args[k] !== undefined);
 	if (!allRequiredPresent) return null;
@@ -947,7 +1069,9 @@ function createQwenToOpenAIStreamTransformer(options?: {
 			const looksLikeMissingToolText = /tool\s+\w+\s+does\s+not\s+exists?/i.test(answerText);
 			const shouldInferByEmpty = !answerText.trim() && lastMessageRole === "user" && !hadRecentToolSuccess;
 			if (looksLikeMissingToolText || shouldInferByEmpty) {
-				const inferred = inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints);
+				const inferred = looksLikeMissingToolText
+					? inferToolCallFromMissingToolText(answerText, fallbackUserText, fallbackTools, pathHints) || inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints)
+					: inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints);
 				if (inferred) {
 					const sameFailedCall = hadToolError &&
 						!!lastAssistantToolName &&
@@ -1012,7 +1136,8 @@ function createQwenToOpenAIStreamTransformer(options?: {
 			return;
 		}
 
-		if (answerText) enqueueJson(controller, mkChunk({ content: answerText }, null));
+		const finalAnswerText = hasCustomTools ? sanitizeToolComplaintText(answerText) : answerText;
+		if (finalAnswerText) enqueueJson(controller, mkChunk({ content: finalAnswerText }, null));
 		enqueueJson(controller, mkChunk({}, "stop"));
 	};
 
