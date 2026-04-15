@@ -66,11 +66,21 @@ type ParsedToolCall = {
 	input: any;
 };
 
-type InferredIntent = "read" | "create" | "delete" | "run" | "edit" | "unknown";
+type InferredIntent = "read" | "create" | "delete" | "run" | "edit" | "list" | "search" | "unknown";
 
 type PathHints = {
 	homeHint?: string;
 	knownPaths: string[];
+};
+
+const WINDOWS_PATH_REGEX = /[A-Za-z]:[\\/](?:[^\s"'`<>]+[\\/])*[^\s"'`<>]+/g;
+const UNIX_PATH_REGEX = /\/(?:[^\s"'`<>]+\/)*[^\s"'`<>]+/g;
+const TOOL_NAME_ALIASES: Record<string, string[]> = {
+	read: ["view", "cat", "open_file"],
+	list: ["ls", "dir", "tree"],
+	bash: ["run", "shell", "exec", "command"],
+	apply_patch: ["patch"],
+	edit: ["multiedit", "str_replace_editor"],
 };
 
 function normalizeOpenAITools(tools: any[]): OpenAITool[] {
@@ -153,6 +163,12 @@ function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolNa
 			"[Tools]\n" +
 			JSON.stringify(toolSpec, null, 2) +
 			"\n[/Tools]\n" +
+			"You are operating as a coding agent with access to workspace tools.\n" +
+			"For any request involving local files, directories, code search, shell commands, or code changes, you MUST use the provided tools instead of answering from memory.\n" +
+			"Never claim you inspected, created, edited, or deleted a local file unless you emitted a tool call and later received a tool result confirming it.\n" +
+			"Prefer one tool call at a time. After a tool result, either emit the next tool call or provide the final answer if the task is complete.\n" +
+			"When the user asks to inspect a file, use a read/view tool first. When the user asks to inspect a directory or project structure, use a list/glob/grep tool first.\n" +
+			"When the user asks to modify files, use edit/write/apply_patch tools. Do not answer with hypothetical edits.\n" +
 			"If a tool is needed, output exactly one tool call block in this format:\n" +
 			"##TOOL_CALL##\n{\"name\":\"tool_name\",\"input\":{...}}\n##END_CALL##\n" +
 			"Do not add markdown fences around the JSON.\n" +
@@ -245,12 +261,15 @@ function collectPathHintsFromMessages(messages: any[]): PathHints {
 				? msg.content.map((x: any) => (x?.type === "text" ? x?.text || "" : "")).join("\n")
 				: "";
 		const text = String(raw || "");
-		const matches = text.match(/\/(?:[^\s"'`<>]+\/)*[^\s"'`<>]+/g) || [];
+		const matches = [
+			...(text.match(UNIX_PATH_REGEX) || []),
+			...(text.match(WINDOWS_PATH_REGEX) || []),
+		];
 		for (const p of matches) pathSet.add(p);
 	}
 	const knownPaths = Array.from(pathSet);
 	const homeFromKnown = knownPaths
-		.map((p) => p.match(/^(\/home\/[^\/]+)/)?.[1] || "")
+		.map((p) => p.match(/^(\/home\/[^\/]+)/)?.[1] || p.match(/^([A-Za-z]:[\\/][^\\/]+)/)?.[1] || "")
 		.find(Boolean);
 	return { homeHint: homeFromKnown || undefined, knownPaths };
 }
@@ -268,10 +287,12 @@ function extractPathFromText(text: string, hints?: PathHints): string | null {
 		if (hit) return hit;
 		return null;
 	}
-	const abs = input.match(/\/(?:[^\s"'`]+\/)*[^\s"'`]+/);
+	const winAbs = input.match(/[A-Za-z]:[\\/](?:[^\s"'`<>]+[\\/])*[^\s"'`<>]+/);
+	if (winAbs?.[0]) return winAbs[0];
+	const abs = input.match(/\/(?:[^\s"'`<>]+\/)*[^\s"'`<>]+/);
 	if (abs?.[0]) return abs[0];
-	const rel = input.match(/(?:\.\/)?[A-Za-z0-9_.\-\/]+\.[A-Za-z0-9_\-]+/);
-	if (rel?.[0]) return rel[0].replace(/^\.\//, "");
+	const rel = input.match(/(?:\.\/|\.\\)?[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9_\-]+/);
+	if (rel?.[0]) return rel[0].replace(/^\.\//, "").replace(/^\.\\/, "");
 	if (/(\.bashrc|bashrc)/i.test(input)) {
 		const knownBashrc = knownPaths.find((p) => p.endsWith("/.bashrc"));
 		if (knownBashrc) return knownBashrc;
@@ -283,6 +304,8 @@ function extractPathFromText(text: string, hints?: PathHints): string | null {
 function inferIntentFromText(text: string): InferredIntent {
 	const lower = (text || "").toLowerCase();
 	if (!lower) return "unknown";
+	if (/(list|ls|dir|tree|目录|文件列表|列出|遍历|结构)/.test(lower)) return "list";
+	if (/(search|find|grep|glob|ripgrep|查找|搜索|检索|匹配)/.test(lower)) return "search";
 	if (/(read|show|view|open|cat|读取|阅读|查看|打开|显示)/.test(lower)) return "read";
 	if (/(create|new|touch|mk|write file|创建|新建)/.test(lower)) return "create";
 	if (/(delete|remove|rm|unlink|删除|移除|删掉)/.test(lower)) return "delete";
@@ -330,8 +353,11 @@ function buildArgsForTool(tool: OpenAITool, intent: InferredIntent, userText: st
 	const contentKey = pickFirstKey(keys, /(content|text|body|data)/i);
 	const commandKey = pickFirstKey(keys, /(command|cmd|script)/i);
 	const descriptionKey = pickFirstKey(keys, /(description|desc|reason)/i);
+	const oldStringKey = pickFirstKey(keys, /(oldstring|old_string)/i);
+	const newStringKey = pickFirstKey(keys, /(newstring|new_string)/i);
 
 	if (path && pathKey) args[pathKey] = path;
+	if (intent === "list" && pathKey && args[pathKey] === undefined) args[pathKey] = ".";
 
 	if (intent === "delete" && commandKey && path) {
 		const escaped = path.replace(/"/g, '\\"');
@@ -341,11 +367,15 @@ function buildArgsForTool(tool: OpenAITool, intent: InferredIntent, userText: st
 	if ((intent === "create" || intent === "edit") && contentKey && args[contentKey] === undefined) {
 		args[contentKey] = "";
 	}
+	if (intent === "edit" && oldStringKey && args[oldStringKey] === undefined) args[oldStringKey] = "";
+	if ((intent === "create" || intent === "edit") && newStringKey && args[newStringKey] === undefined) args[newStringKey] = "";
 
 	if (descriptionKey && args[descriptionKey] === undefined) {
 		if (intent === "delete" && path) args[descriptionKey] = `Delete file ${path}`;
 		else if (intent === "read" && path) args[descriptionKey] = `Read file ${path}`;
 		else if (intent === "create" && path) args[descriptionKey] = `Create file ${path}`;
+		else if (intent === "list") args[descriptionKey] = `List directory ${path || "."}`;
+		else if (intent === "search") args[descriptionKey] = "Search the codebase";
 		else if (intent === "run") args[descriptionKey] = "Run command";
 	}
 
@@ -382,11 +412,17 @@ function scoreToolForIntent(tool: OpenAITool, intent: InferredIntent, userText: 
 	if (intent === "delete" && /(delete|remove|rm|bash|shell|删除|移除)/.test(`${name} ${desc} ${props}`)) score += 6;
 	if (intent === "edit" && /(edit|modify|update|replace|修改|编辑)/.test(`${name} ${desc} ${props}`)) score += 6;
 	if (intent === "run" && /(bash|shell|command|exec|run|执行|命令)/.test(`${name} ${desc} ${props}`)) score += 6;
+	if (intent === "list" && /(list|ls|dir|tree|目录|列出)/.test(`${name} ${desc} ${props}`)) score += 7;
+	if (intent === "search" && /(grep|glob|search|find|查找|搜索)/.test(`${name} ${desc} ${props}`)) score += 7;
 
 	if (intent === "create") {
 		if (name === "write") score += 12;
 		if (name === "edit") score -= 10;
 	}
+	if (intent === "read" && (name === "read" || name === "view")) score += 10;
+	if (intent === "list" && name === "list") score += 10;
+	if (intent === "search" && (name === "grep" || name === "glob")) score += 10;
+	if (intent === "run" && name === "bash") score += 10;
 	if (intent === "edit" && name === "edit") score += 8;
 
 	if (extractPathFromText(userText, hints) && /(filepath|file_path|path|filename|file|target)/.test(props)) score += 3;
@@ -401,6 +437,68 @@ function findToolByName(tools: OpenAITool[], name: string): OpenAITool | null {
 	return null;
 }
 
+function findAllowedToolName(tools: OpenAITool[], requestedName: string): string {
+	const wanted = (requestedName || "").trim();
+	if (!wanted) return "";
+
+	const exact = findToolByName(tools, wanted);
+	if (exact?.function?.name) return exact.function.name;
+
+	const lower = wanted.toLowerCase();
+	for (const tool of tools || []) {
+		if ((tool?.function?.name || "").toLowerCase() === lower) return tool.function!.name!;
+	}
+
+	for (const [canonical, aliases] of Object.entries(TOOL_NAME_ALIASES)) {
+		if (lower === canonical || aliases.includes(lower)) {
+			for (const tool of tools || []) {
+				if ((tool?.function?.name || "").toLowerCase() === canonical) return tool.function!.name!;
+			}
+		}
+	}
+
+	return wanted;
+}
+
+function syncKnownArgumentAliases(input: Record<string, any>, tool: OpenAITool | null) {
+	if (!tool || !input || typeof input !== "object") return input;
+
+	const keys = new Set(Object.keys(getToolPropertyMap(tool)));
+	const pathValue = input.filePath ?? input.file_path ?? input.path ?? input.filename ?? input.file ?? input.target;
+	const oldValue = input.oldString ?? input.old_string;
+	const newValue = input.newString ?? input.new_string ?? input.content ?? input.text ?? input.body ?? input.data;
+	const commandValue = input.command ?? input.cmd ?? input.script;
+	const patchValue = input.patchText ?? input.patch_text ?? input.diff ?? input.patch;
+
+	if (pathValue !== undefined) {
+		for (const key of keys) {
+			if (/(filepath|file_path|path|filename|file|target)/i.test(key)) input[key] = pathValue;
+		}
+	}
+	if (oldValue !== undefined) {
+		for (const key of keys) {
+			if (/(oldstring|old_string)/i.test(key)) input[key] = oldValue;
+		}
+	}
+	if (newValue !== undefined) {
+		for (const key of keys) {
+			if (/(newstring|new_string|content|text|body|data)/i.test(key)) input[key] = newValue;
+		}
+	}
+	if (commandValue !== undefined) {
+		for (const key of keys) {
+			if (/(command|cmd|script)/i.test(key)) input[key] = commandValue;
+		}
+	}
+	if (patchValue !== undefined) {
+		for (const key of keys) {
+			if (/(patchtext|patch_text|diff)/i.test(key)) input[key] = patchValue;
+		}
+	}
+
+	return input;
+}
+
 function normalizeParsedToolCalls(calls: ParsedToolCall[], tools: OpenAITool[], userText: string, hints?: PathHints): ParsedToolCall[] {
 	if (!Array.isArray(calls) || calls.length === 0) return [];
 	const intent = inferIntentFromText(userText);
@@ -409,31 +507,55 @@ function normalizeParsedToolCalls(calls: ParsedToolCall[], tools: OpenAITool[], 
 	const allowedToolNames = new Set((tools || []).map((t) => t?.function?.name).filter(Boolean) as string[]);
 
 	const normalized = calls.map((call) => {
-		const callName = call?.name || "";
-		const input = call?.input && typeof call.input === "object" ? { ...call.input } : {};
-		const filePath = input.filePath || input.path || extractPathFromText(userText, hints) || "";
+		const callName = findAllowedToolName(tools, call?.name || "");
+		const baseTool = findToolByName(tools, callName);
+		const baseArgs = baseTool ? buildArgsForTool(baseTool, intent, userText, hints) : {};
+		const input = call?.input && typeof call.input === "object" ? { ...baseArgs, ...call.input } : { ...baseArgs };
+		syncKnownArgumentAliases(input, baseTool);
+		const filePath = input.filePath || input.file_path || input.path || extractPathFromText(userText, hints) || "";
 
 		if (intent === "create" && callName === "edit" && writeTool) {
 			const writeArgs = buildArgsForTool(writeTool, "create", userText, hints);
-			if (filePath && writeArgs.filePath === undefined) writeArgs.filePath = filePath;
-			if (writeArgs.content === undefined) writeArgs.content = String(input.newString ?? "");
+			const replacementText = String(input.newString ?? input.new_string ?? "");
+			if (replacementText) {
+				const contentKey = pickFirstKey(Object.keys(getToolPropertyMap(writeTool)), /(content|text|body|data|newstring|new_string)/i);
+				if (contentKey) writeArgs[contentKey] = replacementText;
+			}
+			syncKnownArgumentAliases(writeArgs, writeTool);
 			return { ...call, name: "write", input: writeArgs };
 		}
 
 		if (callName === "write" && writeTool) {
-			if (!input.filePath && filePath) input.filePath = filePath;
-			if (input.content === undefined) input.content = "";
-			return { ...call, input };
+			syncKnownArgumentAliases(input, writeTool);
+			return { ...call, name: callName, input };
 		}
 
 		if (callName === "edit" && editTool) {
-			if (!input.filePath && filePath) input.filePath = filePath;
-			if (input.oldString === undefined) input.oldString = "";
-			if (input.newString === undefined) input.newString = "";
-			return { ...call, input };
+			syncKnownArgumentAliases(input, editTool);
+			return { ...call, name: callName, input };
 		}
 
-		return call;
+		if (callName === "read") {
+			syncKnownArgumentAliases(input, baseTool);
+			return { ...call, name: callName, input };
+		}
+
+		if (callName === "list") {
+			syncKnownArgumentAliases(input, baseTool);
+			return { ...call, name: callName, input };
+		}
+
+		if (callName === "bash") {
+			syncKnownArgumentAliases(input, baseTool);
+			return { ...call, name: callName, input };
+		}
+
+		if (callName === "apply_patch") {
+			syncKnownArgumentAliases(input, baseTool);
+			return { ...call, name: callName, input };
+		}
+
+		return { ...call, name: callName, input };
 	});
 
 	const validCalls = normalized.filter((c) => allowedToolNames.has(c.name));
@@ -656,6 +778,13 @@ async function transformOpenAIRequestToQwen(openAIRequest: any, token: string, s
 	const lastMessageRole = String(allMessages[allMessages.length - 1]?.role || "");
 	const hadRecentToolSuccess = lastMessageRole === "tool" && !!lastToolResultText && !/(file\s+not\s+found|permission\s+denied|not\s+found|failed|error|unexpected\s+eof)/i.test(lastToolResultText);
 	const pathHints = collectPathHintsFromMessages(allMessages);
+	logger.debug("Tool request context", {
+		hasCustomTools,
+		forcedToolName,
+		toolNames: tools.map((tool) => tool?.function?.name).filter(Boolean),
+		lastMessageRole,
+		lastUserText: lastUserText.slice(0, 200),
+	});
 
 	let chatTypeForCreation = resolvedType;
 	if (resolvedType === "image_edit") {
@@ -858,6 +987,11 @@ function createQwenToOpenAIStreamTransformer(options?: {
 		}
 
 		if (hasCustomTools && parsedCalls.length > 0) {
+			logger.debug("Resolved tool calls", {
+				parsedCalls,
+				answerPreview: answerText.slice(0, 200),
+				lastMessageRole,
+			});
 			parsedCalls.forEach((tc, idx) => {
 				enqueueJson(controller, mkChunk({
 					tool_calls: [{
