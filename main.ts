@@ -76,14 +76,57 @@ type PathHints = {
 const WINDOWS_PATH_REGEX = /[A-Za-z]:[\\/](?:[^\s"'`<>]+[\\/])*[^\s"'`<>]+/g;
 const UNIX_PATH_REGEX = /\/(?:[^\s"'`<>]+\/)*[^\s"'`<>]+/g;
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
-	read: ["view", "cat", "open_file"],
-	list: ["ls", "dir", "tree"],
-	glob: ["find_files", "file_search"],
-	grep: ["search_files", "ripgrep"],
-	bash: ["run", "shell", "exec", "command"],
+	read: ["view", "cat", "open_file", "Read"],
+	list: ["ls", "dir", "tree", "List"],
+	glob: ["find_files", "file_search", "Glob"],
+	grep: ["search_files", "ripgrep", "Grep"],
+	bash: ["run", "shell", "exec", "command", "Bash"],
 	apply_patch: ["patch"],
-	edit: ["multiedit", "str_replace_editor"],
+	edit: ["multiedit", "str_replace_editor", "Edit"],
+	write: ["create_file", "write_file", "Write"],
 };
+
+function normalizeToolNameForMatch(name: string): string {
+	return (name || "").toLowerCase().replace(/[-_]/g, "");
+}
+
+function findAllowedToolName(tools: OpenAITool[], requestedName: string): string {
+	const wanted = (requestedName || "").trim();
+	if (!wanted) return "";
+
+	const exact = findToolByName(tools, wanted);
+	if (exact?.function?.name) return exact.function.name;
+
+	const lower = wanted.toLowerCase();
+	for (const tool of tools) {
+		if ((tool?.function?.name || "").toLowerCase() === lower) return tool.function!.name!;
+	}
+
+	for (const [canonical, aliases] of Object.entries(TOOL_NAME_ALIASES)) {
+		if (lower === canonical || aliases.map(a => a.toLowerCase()).includes(lower)) {
+			for (const tool of tools) {
+				if ((tool?.function?.name || "").toLowerCase() === canonical) return tool.function!.name!;
+			}
+		}
+	}
+
+	const normalizedWanted = normalizeToolNameForMatch(wanted);
+	for (const tool of tools) {
+		const normalizedAvailable = normalizeToolNameForMatch(tool?.function?.name || "");
+		if (normalizedAvailable === normalizedWanted) return tool.function!.name!;
+	}
+
+	for (const [canonical, aliases] of Object.entries(TOOL_NAME_ALIASES)) {
+		const normalizedCanonical = normalizeToolNameForMatch(canonical);
+		if (normalizedWanted === normalizedCanonical || aliases.some(a => normalizeToolNameForMatch(a) === normalizedWanted)) {
+			for (const tool of tools) {
+				if (normalizeToolNameForMatch(tool?.function?.name || "") === normalizedCanonical) return tool.function!.name!;
+			}
+		}
+	}
+
+	return wanted;
+}
 
 function normalizeOpenAITools(tools: any[]): OpenAITool[] {
 	if (!Array.isArray(tools)) return [];
@@ -161,6 +204,7 @@ function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolNa
 		const normalizedForcedTool = forcedToolName && toolSpec.some((t) => t.name === forcedToolName)
 			? forcedToolName
 			: null;
+		const toolNames = toolSpec.map((t) => t.name).join(", ");
 		lines.push(
 			"[Tools]\n" +
 			JSON.stringify(toolSpec, null, 2) +
@@ -171,10 +215,17 @@ function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolNa
 			"Prefer one tool call at a time. After a tool result, either emit the next tool call or provide the final answer if the task is complete.\n" +
 			"When the user asks to inspect a file, use a read/view tool first. When the user asks to inspect a directory or project structure, use a list/glob/grep tool first.\n" +
 			"When the user asks to modify files, use edit/write/apply_patch tools. Do not answer with hypothetical edits.\n" +
-			"If a tool is needed, output exactly one tool call block in this format:\n" +
+			"\n" +
+			"CRITICAL: When you need to use a tool, you MUST output a tool call block in EXACTLY this format:\n" +
 			"##TOOL_CALL##\n{\"name\":\"tool_name\",\"input\":{...}}\n##END_CALL##\n" +
-			"Do not add markdown fences around the JSON.\n" +
-			"Never claim a listed tool does not exist; choose only from the listed tools."
+			"\n" +
+			"Rules for tool calls:\n" +
+			"- The \"name\" field MUST be one of: [" + toolNames + "]. Do NOT invent tool names.\n" +
+			"- The \"input\" field MUST contain the required parameters for that tool.\n" +
+			"- Do NOT wrap the JSON in markdown code fences.\n" +
+			"- Output ONLY the tool call block when you decide to call a tool, do NOT add extra text before or after it.\n" +
+			"- If you are unsure which tool to use, pick the closest match from the list above. Never say a tool does not exist.\n" +
+			"- For file paths, use absolute paths when available, or relative paths from the workspace root."
 		);
 		if (normalizedForcedTool) {
 			lines.push(
@@ -439,29 +490,6 @@ function findToolByName(tools: OpenAITool[], name: string): OpenAITool | null {
 	return null;
 }
 
-function findAllowedToolName(tools: OpenAITool[], requestedName: string): string {
-	const wanted = (requestedName || "").trim();
-	if (!wanted) return "";
-
-	const exact = findToolByName(tools, wanted);
-	if (exact?.function?.name) return exact.function.name;
-
-	const lower = wanted.toLowerCase();
-	for (const tool of tools || []) {
-		if ((tool?.function?.name || "").toLowerCase() === lower) return tool.function!.name!;
-	}
-
-	for (const [canonical, aliases] of Object.entries(TOOL_NAME_ALIASES)) {
-		if (lower === canonical || aliases.includes(lower)) {
-			for (const tool of tools || []) {
-				if ((tool?.function?.name || "").toLowerCase() === canonical) return tool.function!.name!;
-			}
-		}
-	}
-
-	return wanted;
-}
-
 function syncKnownArgumentAliases(input: Record<string, any>, tool: OpenAITool | null) {
 	if (!tool || !input || typeof input !== "object") return input;
 
@@ -609,6 +637,8 @@ function inferToolCallFromMissingToolText(answerText: string, userText: string, 
 function sanitizeToolComplaintText(answerText: string): string {
 	return String(answerText || "")
 		.replace(/tool\s+[a-zA-Z0-9_\-]+\s+does\s+not\s+exists?\.?\s*/gi, "")
+		.replace(/##TOOL_CALL##[\s\S]*?##END_CALL##/gi, "")
+		.replace(/I (?:don't|do not) have (?:access to|the ability to use)\s+[a-zA-Z0-9_\-]+\.?\s*/gi, "")
 		.trim();
 }
 
@@ -1023,6 +1053,9 @@ function createQwenToOpenAIStreamTransformer(options?: {
 	const nativeToolById: Record<string, { name: string; args: string }> = {};
 	let roleSent = false;
 	let finalFlushed = false;
+	let toolCallAccumulator = "";
+	let insideToolCall = false;
+	let pendingToolCalls: ParsedToolCall[] = [];
 
 	const enqueueJson = (controller: any, obj: any) => {
 		controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
@@ -1035,6 +1068,35 @@ function createQwenToOpenAIStreamTransformer(options?: {
 		model: "qwen-proxy",
 		choices: [{ index: 0, delta, finish_reason: finish }],
 	});
+
+	const emitToolCallsNow = (controller: any, calls: ParsedToolCall[]) => {
+		if (!calls.length) return;
+		const normalized = hasCustomTools
+			? normalizeParsedToolCalls(calls, fallbackTools, fallbackUserText, pathHints)
+			: calls;
+		if (!normalized.length) return;
+		if (!roleSent) {
+			enqueueJson(controller, mkChunk({ role: "assistant" }, null));
+			roleSent = true;
+		}
+		normalized.forEach((tc, idx) => {
+			enqueueJson(controller, mkChunk({
+				tool_calls: [{
+					index: idx,
+					id: tc.id,
+					type: "function",
+					function: { name: tc.name, arguments: "" },
+				}],
+			}, null));
+			enqueueJson(controller, mkChunk({
+				tool_calls: [{
+					index: idx,
+					function: { arguments: JSON.stringify(tc.input ?? {}, null, 0) },
+				}],
+			}, null));
+		});
+		enqueueJson(controller, mkChunk({}, "tool_calls"));
+	};
 
 	const flushBufferedResult = (controller: any) => {
 		if (finalFlushed) return;
@@ -1070,7 +1132,7 @@ function createQwenToOpenAIStreamTransformer(options?: {
 			const shouldInferByEmpty = !answerText.trim() && lastMessageRole === "user" && !hadRecentToolSuccess;
 			if (looksLikeMissingToolText || shouldInferByEmpty) {
 				const inferred = looksLikeMissingToolText
-					? inferToolCallFromMissingToolText(answerText, fallbackUserText, fallbackTools, pathHints) || inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints)
+					? inferToolCallFromMissingToolText(answerText, fallbackUserText, fallbackTools, pathHints)
 					: inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints);
 				if (inferred) {
 					const sameFailedCall = hadToolError &&
@@ -1080,8 +1142,18 @@ function createQwenToOpenAIStreamTransformer(options?: {
 					const sameAsLastCall = !!lastAssistantToolName &&
 						inferred.name === lastAssistantToolName &&
 						JSON.stringify(inferred.input ?? {}) === JSON.stringify(lastArgs ?? {});
-					if (!sameFailedCall && !(lastMessageRole === "tool" && sameAsLastCall)) {
-						parsedCalls = [inferred];
+
+					const inferredTool = findToolByName(fallbackTools, inferred.name);
+					if (!inferredTool) {
+						logger.debug("Inferred tool name not found in available tools, skipping", { inferredName: inferred.name });
+					} else if (!sameFailedCall && !(lastMessageRole === "tool" && sameAsLastCall)) {
+						const inferredRequired = getToolRequiredKeys(inferredTool);
+						const hasAllRequired = inferredRequired.every((k) => inferred.input?.[k] !== undefined && inferred.input?.[k] !== "");
+						if (hasAllRequired) {
+							parsedCalls = [inferred];
+						} else {
+							logger.debug("Inferred tool call missing required params, skipping", { inferredName: inferred.name, input: inferred.input });
+						}
 					}
 				}
 			}
@@ -1090,11 +1162,19 @@ function createQwenToOpenAIStreamTransformer(options?: {
 		if (parsedCalls.length === 0 && hasCustomTools && forcedToolName) {
 			const forcedExists = fallbackTools.some((t) => t?.function?.name === forcedToolName);
 			if (forcedExists) {
-				parsedCalls = [{
-					id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-					name: forcedToolName,
-					input: {},
-				}];
+				const forcedTool = findToolByName(fallbackTools, forcedToolName);
+				if (forcedTool) {
+					const forcedArgs = buildArgsForTool(forcedTool, inferIntentFromToolName(forcedToolName), fallbackUserText, pathHints);
+					const forcedRequired = getToolRequiredKeys(forcedTool);
+					const allForcedPresent = forcedRequired.every((k) => forcedArgs[k] !== undefined && forcedArgs[k] !== "" && !(Array.isArray(forcedArgs[k]) && forcedArgs[k].length === 0));
+					if (allForcedPresent) {
+						parsedCalls = [{
+							id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+							name: forcedToolName,
+							input: forcedArgs,
+						}];
+					}
+				}
 			}
 		}
 
@@ -1223,6 +1303,37 @@ function createQwenToOpenAIStreamTransformer(options?: {
 							}
 						} else {
 							answerText += content;
+
+							if (hasCustomTools && !insideToolCall && answerText.includes("##TOOL_CALL##")) {
+								const callStartIdx = answerText.lastIndexOf("##TOOL_CALL##");
+								const beforeCall = answerText.substring(0, callStartIdx);
+								answerText = answerText.substring(callStartIdx);
+								insideToolCall = true;
+								toolCallAccumulator = "";
+
+								if (beforeCall.trim()) {
+									if (!roleSent) {
+										enqueueJson(controller, mkChunk({ role: "assistant" }, null));
+										roleSent = true;
+									}
+									enqueueJson(controller, mkChunk({ content: beforeCall }, null));
+								}
+							}
+
+							if (insideToolCall) {
+								toolCallAccumulator += content;
+								if (toolCallAccumulator.includes("##END_CALL##")) {
+									insideToolCall = false;
+									const extracted = toolCallAccumulator;
+									toolCallAccumulator = "";
+									const parsed = parseToolCallsFromText("##TOOL_CALL##" + extracted);
+									if (parsed.length > 0) {
+										emitToolCallsNow(controller, parsed);
+										finalFlushed = true;
+									}
+									answerText = "";
+								}
+							}
 						}
 					}
 
