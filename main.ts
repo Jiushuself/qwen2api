@@ -1124,6 +1124,29 @@ function createQwenToOpenAIStreamTransformer(options?: {
 				parsedCalls = parseAndValidateToolCalls(answerText, fallbackTools);
 			}
 
+			if (parsedCalls.length === 0) {
+				const missingToolPattern = /tool\s+([a-zA-Z0-9_\-]+)\s+does\s+not\s+exists?/gi;
+				let match: RegExpExecArray | null;
+				while ((match = missingToolPattern.exec(answerText)) !== null) {
+					const toolName = match[1]?.toLowerCase();
+					if (!toolName) continue;
+					const tool = findToolByName(fallbackTools, toolName);
+					if (tool?.function?.name) {
+						const required = getToolRequiredKeys(tool);
+						const input: Record<string, any> = {};
+						for (const k of required) {
+							input[k] = "";
+						}
+						parsedCalls = [{
+							id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+							name: tool.function.name,
+							input,
+						}];
+						break;
+					}
+				}
+			}
+
 			if (parsedCalls.length === 0 && forcedToolName) {
 				const exists = fallbackTools.some(
 					(t) => t?.function?.name === forcedToolName
