@@ -1109,7 +1109,20 @@ function createQwenToOpenAIStreamTransformer(options?: {
 		let parsedCalls: ParsedToolCall[] = [];
 
 		if (hasCustomTools) {
-			parsedCalls = parseAndValidateToolCalls(answerText, fallbackTools);
+			if (Object.keys(nativeToolById).length > 0) {
+				parsedCalls = Object.keys(nativeToolById).map((id) => {
+					const tc = nativeToolById[id];
+					return {
+						id: id || `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+						name: tc.name,
+						input: safeJsonParse(tc.args, { raw: tc.args }),
+					};
+				}).filter((tc) => !!tc.name);
+			}
+
+			if (parsedCalls.length === 0) {
+				parsedCalls = parseAndValidateToolCalls(answerText, fallbackTools);
+			}
 
 			if (parsedCalls.length === 0 && forcedToolName) {
 				const exists = fallbackTools.some(
