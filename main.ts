@@ -181,13 +181,16 @@ function resolveForcedToolName(toolChoice: any): string | null {
 	return null;
 }
 
-function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolName?: string | null): string {
+function buildPromptWithTools(
+	messages: any[],
+	tools: OpenAITool[],
+	forcedToolName?: string | null
+): string {
 	const lines: string[] = [];
 	let systemPrompt = "You are a helpful assistant.";
 
 	for (const msg of messages || []) {
-		const role = msg?.role;
-		if (role === "system") {
+		if (msg?.role === "system") {
 			const text = extractTextContent(msg?.content);
 			if (text) systemPrompt = text;
 		}
@@ -201,38 +204,27 @@ function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolNa
 			description: t.function?.description || "",
 			parameters: t.function?.parameters || { type: "object", properties: {} },
 		}));
-		const normalizedForcedTool = forcedToolName && toolSpec.some((t) => t.name === forcedToolName)
-			? forcedToolName
-			: null;
-		const toolNames = toolSpec.map((t) => t.name).join(", ");
+
 		lines.push(
-			"[Tools]\n" +
+			"[Available Tools]\n" +
 			JSON.stringify(toolSpec, null, 2) +
-			"\n[/Tools]\n" +
-			"You are operating as a coding agent with access to workspace tools.\n" +
-			"For any request involving local files, directories, code search, shell commands, or code changes, you MUST use the provided tools instead of answering from memory.\n" +
-			"Never claim you inspected, created, edited, or deleted a local file unless you emitted a tool call and later received a tool result confirming it.\n" +
-			"Prefer one tool call at a time. After a tool result, either emit the next tool call or provide the final answer if the task is complete.\n" +
-			"When the user asks to inspect a file, use a read/view tool first. When the user asks to inspect a directory or project structure, use a list/glob/grep tool first.\n" +
-			"When the user asks to modify files, use edit/write/apply_patch tools. Do not answer with hypothetical edits.\n" +
-			"\n" +
-			"CRITICAL: When you need to use a tool, you MUST output a tool call block in EXACTLY this format:\n" +
-			"##TOOL_CALL##\n{\"name\":\"tool_name\",\"input\":{...}}\n##END_CALL##\n" +
-			"\n" +
-			"Rules for tool calls:\n" +
-			"- The \"name\" field MUST be one of: [" + toolNames + "]. Do NOT invent tool names.\n" +
-			"- The \"input\" field MUST contain the required parameters for that tool.\n" +
-			"- Do NOT wrap the JSON in markdown code fences.\n" +
-			"- Output ONLY the tool call block when you decide to call a tool, do NOT add extra text before or after it.\n" +
-			"- If you are unsure which tool to use, pick the closest match from the list above. Never say a tool does not exist.\n" +
-			"- For file paths, use absolute paths when available, or relative paths from the workspace root."
+			"\n[/Available Tools]\n\n" +
+			"[Tool Call Rules]\n" +
+			"- If you need to call a tool, output ONLY this block, nothing else:\n" +
+			"##TOOL_CALL##\n" +
+			'{"name":"<exact_tool_name>","input":{<valid_json_args>}}\n' +
+			"##END_CALL##\n" +
+			"- The JSON must be valid and parseable.\n" +
+			"- Only use tool names from the list above. Never invent tool names.\n" +
+			"- If no tool is needed, respond normally in plain text.\n" +
+			"- Never wrap the JSON in markdown fences.\n" +
+			"[/Tool Call Rules]"
 		);
-		if (normalizedForcedTool) {
+
+		if (forcedToolName && toolSpec.some((t) => t.name === forcedToolName)) {
 			lines.push(
-				"[ToolChoice]\n" +
-				`You MUST call this tool now: ${normalizedForcedTool}.` +
-				"\nReturn only the tool call block; do not output normal assistant text.\n" +
-				"[/ToolChoice]"
+				`[Forced Tool]\nYou MUST call the tool named "${forcedToolName}" now.\n` +
+				"Output only the ##TOOL_CALL## block.\n[/Forced Tool]"
 			);
 		}
 	}
@@ -267,39 +259,46 @@ function buildPromptWithTools(messages: any[], tools: OpenAITool[], forcedToolNa
 	return lines.join("\n\n");
 }
 
-function parseToolCallsFromText(answer: string): ParsedToolCall[] {
+function parseAndValidateToolCalls(
+	answer: string,
+	tools: OpenAITool[]
+): ParsedToolCall[] {
+	const allowedNames = new Set(
+		tools.map((t) => t.function?.name).filter(Boolean) as string[]
+	);
 	const blocks: ParsedToolCall[] = [];
-	const add = (name: string, input: any) => {
-		if (!name) return;
-		blocks.push({ id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`, name, input: input ?? {} });
-	};
 
-	const regexes = [
-		/##TOOL_CALL##\s*([\s\S]*?)\s*##END_CALL##/gi,
-		/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi,
-	];
+	const re = /##TOOL_CALL##\s*([\s\S]*?)\s*##END_CALL##/gi;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(answer)) !== null) {
+		const raw = (m[1] || "").trim();
+		let obj: any;
+		try { obj = JSON.parse(raw); } catch { continue; }
 
-	for (const re of regexes) {
-		let m: RegExpExecArray | null;
-		while ((m = re.exec(answer)) !== null) {
-			const obj = safeJsonParse((m[1] || "").trim(), null);
-			if (!obj || typeof obj !== "object") continue;
-			const name = obj.name || obj.function?.name || "";
-			const input = obj.input ?? obj.arguments ?? obj.parameters ?? obj.args ?? {};
-			add(name, input);
-		}
-	}
+		const name = String(obj?.name || "");
+		if (!name || !allowedNames.has(name)) continue;
 
-	if (blocks.length === 0) {
-		const trimmed = answer.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/, "").trim();
-		if (trimmed.startsWith("{") && trimmed.includes("\"name\"")) {
-			const obj = safeJsonParse(trimmed, null);
-			if (obj && typeof obj === "object") {
-				const name = obj.name || obj.function?.name || "";
-				const input = obj.input ?? obj.arguments ?? obj.parameters ?? obj.args ?? {};
-				add(name, input);
+		const input = obj?.input ?? obj?.arguments ?? {};
+		const tool = tools.find((t) => t.function?.name === name);
+		const required: string[] =
+			tool?.function?.parameters?.required ?? [];
+		const missing = required.filter((k) => !(k in input));
+		if (missing.length > 0) {
+			for (const k of missing) {
+				const propType =
+					tool?.function?.parameters?.properties?.[k]?.type ?? "string";
+				input[k] =
+					propType === "array" ? [] :
+					propType === "boolean" ? false :
+					propType === "number" || propType === "integer" ? 0 : "";
 			}
 		}
+
+		blocks.push({
+			id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+			name,
+			input,
+		});
 	}
 
 	return blocks;
@@ -1108,116 +1107,44 @@ function createQwenToOpenAIStreamTransformer(options?: {
 		}
 
 		let parsedCalls: ParsedToolCall[] = [];
-		if (Object.keys(nativeToolById).length > 0) {
-			parsedCalls = Object.keys(nativeToolById).map((id) => {
-				const tc = nativeToolById[id];
-				return {
-					id: id || `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-					name: tc.name,
-					input: safeJsonParse(tc.args, { raw: tc.args }),
-				};
-			}).filter((tc) => !!tc.name);
-		}
 
-		if (parsedCalls.length === 0 && answerText.trim()) {
-			parsedCalls = parseToolCallsFromText(answerText);
-		}
+		if (hasCustomTools) {
+			parsedCalls = parseAndValidateToolCalls(answerText, fallbackTools);
 
-		if (parsedCalls.length > 0 && hasCustomTools) {
-			parsedCalls = normalizeParsedToolCalls(parsedCalls, fallbackTools, fallbackUserText, pathHints);
-		}
-
-		if (parsedCalls.length === 0 && hasCustomTools) {
-			const looksLikeMissingToolText = /tool\s+\w+\s+does\s+not\s+exists?/i.test(answerText);
-			const shouldInferByEmpty = !answerText.trim() && lastMessageRole === "user" && !hadRecentToolSuccess;
-			if (looksLikeMissingToolText || shouldInferByEmpty) {
-				const inferred = looksLikeMissingToolText
-					? inferToolCallFromMissingToolText(answerText, fallbackUserText, fallbackTools, pathHints)
-					: inferToolCallFromIntent(fallbackUserText, fallbackTools, pathHints);
-				if (inferred) {
-					const sameFailedCall = hadToolError &&
-						!!lastAssistantToolName &&
-						inferred.name === lastAssistantToolName &&
-						JSON.stringify(inferred.input ?? {}) === JSON.stringify(lastArgs ?? {});
-					const sameAsLastCall = !!lastAssistantToolName &&
-						inferred.name === lastAssistantToolName &&
-						JSON.stringify(inferred.input ?? {}) === JSON.stringify(lastArgs ?? {});
-
-					const inferredTool = findToolByName(fallbackTools, inferred.name);
-					if (!inferredTool) {
-						logger.debug("Inferred tool name not found in available tools, skipping", { inferredName: inferred.name });
-					} else if (!sameFailedCall && !(lastMessageRole === "tool" && sameAsLastCall)) {
-						const inferredRequired = getToolRequiredKeys(inferredTool);
-						const hasAllRequired = inferredRequired.every((k) => inferred.input?.[k] !== undefined && inferred.input?.[k] !== "");
-						if (hasAllRequired) {
-							parsedCalls = [inferred];
-						} else {
-							logger.debug("Inferred tool call missing required params, skipping", { inferredName: inferred.name, input: inferred.input });
-						}
-					}
+			if (parsedCalls.length === 0 && forcedToolName) {
+				const exists = fallbackTools.some(
+					(t) => t?.function?.name === forcedToolName
+				);
+				if (exists) {
+					parsedCalls = [{
+						id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+						name: forcedToolName,
+						input: {},
+					}];
 				}
+			}
+
+			if (parsedCalls.length > 0) {
+				parsedCalls.forEach((tc, idx) => {
+					enqueueJson(controller, mkChunk({
+						tool_calls: [{
+							index: idx, id: tc.id, type: "function",
+							function: { name: tc.name, arguments: "" },
+						}],
+					}, null));
+					enqueueJson(controller, mkChunk({
+						tool_calls: [{
+							index: idx,
+							function: { arguments: JSON.stringify(tc.input ?? {}) },
+						}],
+					}, null));
+				});
+				enqueueJson(controller, mkChunk({}, "tool_calls"));
+				return;
 			}
 		}
 
-		if (parsedCalls.length === 0 && hasCustomTools && forcedToolName) {
-			const forcedExists = fallbackTools.some((t) => t?.function?.name === forcedToolName);
-			if (forcedExists) {
-				const forcedTool = findToolByName(fallbackTools, forcedToolName);
-				if (forcedTool) {
-					const forcedArgs = buildArgsForTool(forcedTool, inferIntentFromToolName(forcedToolName), fallbackUserText, pathHints);
-					const forcedRequired = getToolRequiredKeys(forcedTool);
-					const allForcedPresent = forcedRequired.every((k) => forcedArgs[k] !== undefined && forcedArgs[k] !== "" && !(Array.isArray(forcedArgs[k]) && forcedArgs[k].length === 0));
-					if (allForcedPresent) {
-						parsedCalls = [{
-							id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-							name: forcedToolName,
-							input: forcedArgs,
-						}];
-					}
-				}
-			}
-		}
-
-		if (parsedCalls.length > 0 && hasCustomTools) {
-			parsedCalls = normalizeParsedToolCalls(parsedCalls, fallbackTools, fallbackUserText, pathHints);
-		}
-
-		if (hasCustomTools && lastMessageRole === "tool" && parsedCalls.length > 0) {
-			parsedCalls = parsedCalls.filter((tc) => !(
-				!!lastAssistantToolName &&
-				tc.name === lastAssistantToolName &&
-				JSON.stringify(tc.input ?? {}) === JSON.stringify(lastArgs ?? {})
-			));
-		}
-
-		if (hasCustomTools && parsedCalls.length > 0) {
-			logger.debug("Resolved tool calls", {
-				parsedCalls,
-				answerPreview: answerText.slice(0, 200),
-				lastMessageRole,
-			});
-			parsedCalls.forEach((tc, idx) => {
-				enqueueJson(controller, mkChunk({
-					tool_calls: [{
-						index: idx,
-						id: tc.id,
-						type: "function",
-						function: { name: tc.name, arguments: "" },
-					}],
-				}, null));
-				enqueueJson(controller, mkChunk({
-					tool_calls: [{
-						index: idx,
-						function: { arguments: JSON.stringify(tc.input ?? {}, null, 0) },
-					}],
-				}, null));
-			});
-			enqueueJson(controller, mkChunk({}, "tool_calls"));
-			return;
-		}
-
-		const finalAnswerText = hasCustomTools ? sanitizeToolComplaintText(answerText) : answerText;
-		if (finalAnswerText) enqueueJson(controller, mkChunk({ content: finalAnswerText }, null));
+		if (answerText) enqueueJson(controller, mkChunk({ content: answerText }, null));
 		enqueueJson(controller, mkChunk({}, "stop"));
 	};
 
@@ -1326,7 +1253,7 @@ function createQwenToOpenAIStreamTransformer(options?: {
 									insideToolCall = false;
 									const extracted = toolCallAccumulator;
 									toolCallAccumulator = "";
-									const parsed = parseToolCallsFromText("##TOOL_CALL##" + extracted);
+									const parsed = parseAndValidateToolCalls("##TOOL_CALL##" + extracted, fallbackTools);
 									if (parsed.length > 0) {
 										emitToolCallsNow(controller, parsed);
 										finalFlushed = true;
