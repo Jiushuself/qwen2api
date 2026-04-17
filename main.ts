@@ -1070,15 +1070,11 @@ function createQwenToOpenAIStreamTransformer(options?: {
 
 	const emitToolCallsNow = (controller: any, calls: ParsedToolCall[]) => {
 		if (!calls.length) return;
-		const normalized = hasCustomTools
-			? normalizeParsedToolCalls(calls, fallbackTools, fallbackUserText, pathHints)
-			: calls;
-		if (!normalized.length) return;
 		if (!roleSent) {
 			enqueueJson(controller, mkChunk({ role: "assistant" }, null));
 			roleSent = true;
 		}
-		normalized.forEach((tc, idx) => {
+		calls.forEach((tc, idx) => {
 			enqueueJson(controller, mkChunk({
 				tool_calls: [{
 					index: idx,
