@@ -271,48 +271,61 @@ function parseAndValidateToolCalls(
 	);
 	const blocks: ParsedToolCall[] = [];
 
-	const regexes = [
+	const tryParse = (raw: string): void => {
+		let obj: any;
+		try { obj = JSON.parse(raw); } catch { return; }
+		if (!obj || typeof obj !== "object") return;
+		const rawName = String(obj?.name || obj?.function?.name || "");
+		if (!rawName) return;
+		const canonicalName = allowedNames.get(rawName.toLowerCase());
+		if (!canonicalName) return;
+
+		const input = obj?.input ?? obj?.arguments ?? {};
+		const tool = tools.find((t) => t.function?.name === canonicalName);
+		const required: string[] =
+			tool?.function?.parameters?.required ?? [];
+		const missing = required.filter((k) => !(k in input));
+		if (missing.length > 0) {
+			for (const k of missing) {
+				const propType =
+					tool?.function?.parameters?.properties?.[k]?.type ?? "string";
+				input[k] =
+					propType === "array" ? [] :
+					propType === "boolean" ? false :
+					propType === "number" || propType === "integer" ? 0 : "";
+			}
+		}
+
+		blocks.push({
+			id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+			name: canonicalName,
+			input,
+		});
+	};
+
+	const tagRegexes = [
 		/##TOOL_CALL##\s*([\s\S]*?)\s*##END_CALL##/gi,
 		/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi,
 	];
 
-	for (const re of regexes) {
+	for (const re of tagRegexes) {
 		let m: RegExpExecArray | null;
 		while ((m = re.exec(answer)) !== null) {
-			const raw = (m[1] || "").trim();
-			let obj: any;
-			try {
-				obj = JSON.parse(raw);
-			} catch { continue; }
+			tryParse((m[1] || "").trim());
+		}
+	}
 
-			if (!obj || typeof obj !== "object") continue;
-			const rawName = String(obj?.name || "");
-			if (!rawName) continue;
-
-			const canonicalName = allowedNames.get(rawName.toLowerCase());
-			if (!canonicalName) continue;
-
-			const input = obj?.input ?? obj?.arguments ?? {};
-			const tool = tools.find((t) => t.function?.name === canonicalName);
-			const required: string[] =
-				tool?.function?.parameters?.required ?? [];
-			const missing = required.filter((k) => !(k in input));
-			if (missing.length > 0) {
-				for (const k of missing) {
-					const propType =
-						tool?.function?.parameters?.properties?.[k]?.type ?? "string";
-					input[k] =
-						propType === "array" ? [] :
-						propType === "boolean" ? false :
-						propType === "number" || propType === "integer" ? 0 : "";
-				}
-			}
-
-			blocks.push({
-				id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-				name: canonicalName,
-				input,
-			});
+	if (blocks.length === 0) {
+		const trimmed = answer.trim()
+			.replace(/^```(?:json)?\s*/i, "")
+			.replace(/```$/, "")
+			.trim();
+		if (
+			trimmed.startsWith("{") &&
+			/"/.test(trimmed) &&
+			trimmed.includes('"name"')
+		) {
+			tryParse(trimmed);
 		}
 	}
 
@@ -1019,6 +1032,14 @@ async function transformOpenAIRequestToQwen(openAIRequest: any, token: string, s
 	};
 
 	if (hasCustomTools) {
+		req.tools = tools.map((t) => ({
+			type: t.type || "function",
+			function: {
+				name: t.function?.name,
+				description: t.function?.description || "",
+				parameters: t.function?.parameters || { type: "object", properties: {} },
+			},
+		}));
 		req.messages[0].feature_config = {
 			...req.messages[0].feature_config,
 			thinking_enabled: false,
