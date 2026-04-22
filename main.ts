@@ -1,7 +1,7 @@
 /**
  * Qwen API to OpenAI Standard - Single File Deno Deploy/Playground Script
  *
- * @version 5.0.9
+ * @version 5.1.0
  * @description 完全按照官方 payload + CORS 支持 + 搜索模式修复 + 增强工具调用支持
  */
 
@@ -1290,7 +1290,7 @@ const authMiddleware: Middleware = async (ctx, next) => {
 app.use(authMiddleware);
 
 router.get("/", (ctx) => {
-	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.0.9</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.0.9 支持增强工具调用（Function Calling）</p><p>API 文档请参考 README</p></body></html>`;
+	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.1.0</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.1.0 支持增强工具调用（Function Calling）</p><p>API 文档请参考 README</p></body></html>`;
 	ctx.response.body = html;
 	ctx.response.headers.set("Content-Type", "text/html");
 });
@@ -1374,5 +1374,5 @@ app.use(router.allowedMethods());
 
 app.use((ctx) => { ctx.response.status = 404; ctx.response.body = { error: "Not Found" }; });
 
-console.log("🚀 Qwen Proxy v5.0.9 启动 - 支持增强工具调用");
+console.log("🚀 Qwen Proxy v5.1.0 启动 - 支持增强工具调用");
 Deno.serve((req) => app.handle(req));
