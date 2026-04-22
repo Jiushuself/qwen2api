@@ -263,42 +263,57 @@ function parseAndValidateToolCalls(
 	answer: string,
 	tools: OpenAITool[]
 ): ParsedToolCall[] {
-	const allowedNames = new Set(
-		tools.map((t) => t.function?.name).filter(Boolean) as string[]
+	const allowedNames = new Map(
+		tools.map((t) => {
+			const name = t.function?.name;
+			return name ? [name.toLowerCase(), name] : null;
+		}).filter(Boolean) as [string, string][]
 	);
 	const blocks: ParsedToolCall[] = [];
 
-	const re = /##TOOL_CALL##\s*([\s\S]*?)\s*##END_CALL##/gi;
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(answer)) !== null) {
-		const raw = (m[1] || "").trim();
-		let obj: any;
-		try { obj = JSON.parse(raw); } catch { continue; }
+	const regexes = [
+		/##TOOL_CALL##\s*([\s\S]*?)\s*##END_CALL##/gi,
+		/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi,
+	];
 
-		const name = String(obj?.name || "");
-		if (!name || !allowedNames.has(name)) continue;
+	for (const re of regexes) {
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(answer)) !== null) {
+			const raw = (m[1] || "").trim();
+			let obj: any;
+			try {
+				obj = JSON.parse(raw);
+			} catch { continue; }
 
-		const input = obj?.input ?? obj?.arguments ?? {};
-		const tool = tools.find((t) => t.function?.name === name);
-		const required: string[] =
-			tool?.function?.parameters?.required ?? [];
-		const missing = required.filter((k) => !(k in input));
-		if (missing.length > 0) {
-			for (const k of missing) {
-				const propType =
-					tool?.function?.parameters?.properties?.[k]?.type ?? "string";
-				input[k] =
-					propType === "array" ? [] :
-					propType === "boolean" ? false :
-					propType === "number" || propType === "integer" ? 0 : "";
+			if (!obj || typeof obj !== "object") continue;
+			const rawName = String(obj?.name || "");
+			if (!rawName) continue;
+
+			const canonicalName = allowedNames.get(rawName.toLowerCase());
+			if (!canonicalName) continue;
+
+			const input = obj?.input ?? obj?.arguments ?? {};
+			const tool = tools.find((t) => t.function?.name === canonicalName);
+			const required: string[] =
+				tool?.function?.parameters?.required ?? [];
+			const missing = required.filter((k) => !(k in input));
+			if (missing.length > 0) {
+				for (const k of missing) {
+					const propType =
+						tool?.function?.parameters?.properties?.[k]?.type ?? "string";
+					input[k] =
+						propType === "array" ? [] :
+						propType === "boolean" ? false :
+						propType === "number" || propType === "integer" ? 0 : "";
+				}
 			}
-		}
 
-		blocks.push({
-			id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-			name,
-			input,
-		});
+			blocks.push({
+				id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+				name: canonicalName,
+				input,
+			});
+		}
 	}
 
 	return blocks;
@@ -1052,9 +1067,7 @@ function createQwenToOpenAIStreamTransformer(options?: {
 	const nativeToolById: Record<string, { name: string; args: string }> = {};
 	let roleSent = false;
 	let finalFlushed = false;
-	let toolCallAccumulator = "";
-	let insideToolCall = false;
-	let pendingToolCalls: ParsedToolCall[] = [];
+
 
 	const enqueueJson = (controller: any, obj: any) => {
 		controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
@@ -1067,31 +1080,6 @@ function createQwenToOpenAIStreamTransformer(options?: {
 		model: "qwen-proxy",
 		choices: [{ index: 0, delta, finish_reason: finish }],
 	});
-
-	const emitToolCallsNow = (controller: any, calls: ParsedToolCall[]) => {
-		if (!calls.length) return;
-		if (!roleSent) {
-			enqueueJson(controller, mkChunk({ role: "assistant" }, null));
-			roleSent = true;
-		}
-		calls.forEach((tc, idx) => {
-			enqueueJson(controller, mkChunk({
-				tool_calls: [{
-					index: idx,
-					id: tc.id,
-					type: "function",
-					function: { name: tc.name, arguments: "" },
-				}],
-			}, null));
-			enqueueJson(controller, mkChunk({
-				tool_calls: [{
-					index: idx,
-					function: { arguments: JSON.stringify(tc.input ?? {}, null, 0) },
-				}],
-			}, null));
-		});
-		enqueueJson(controller, mkChunk({}, "tool_calls"));
-	};
 
 	const flushBufferedResult = (controller: any) => {
 		if (finalFlushed) return;
@@ -1118,29 +1106,6 @@ function createQwenToOpenAIStreamTransformer(options?: {
 
 			if (parsedCalls.length === 0) {
 				parsedCalls = parseAndValidateToolCalls(answerText, fallbackTools);
-			}
-
-			if (parsedCalls.length === 0) {
-				const missingToolPattern = /tool\s+([a-zA-Z0-9_\-]+)\s+does\s+not\s+exists?/gi;
-				let match: RegExpExecArray | null;
-				while ((match = missingToolPattern.exec(answerText)) !== null) {
-					const toolName = match[1]?.toLowerCase();
-					if (!toolName) continue;
-					const tool = findToolByName(fallbackTools, toolName);
-					if (tool?.function?.name) {
-						const required = getToolRequiredKeys(tool);
-						const input: Record<string, any> = {};
-						for (const k of required) {
-							input[k] = "";
-						}
-						parsedCalls = [{
-							id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-							name: tool.function.name,
-							input,
-						}];
-						break;
-					}
-				}
 			}
 
 			if (parsedCalls.length === 0 && forcedToolName) {
@@ -1176,7 +1141,8 @@ function createQwenToOpenAIStreamTransformer(options?: {
 			}
 		}
 
-		if (answerText) enqueueJson(controller, mkChunk({ content: answerText }, null));
+		const finalAnswer = hasCustomTools ? sanitizeToolComplaintText(answerText) : answerText;
+		if (finalAnswer) enqueueJson(controller, mkChunk({ content: finalAnswer }, null));
 		enqueueJson(controller, mkChunk({}, "stop"));
 	};
 
@@ -1262,37 +1228,6 @@ function createQwenToOpenAIStreamTransformer(options?: {
 							}
 						} else {
 							answerText += content;
-
-							if (hasCustomTools && !insideToolCall && answerText.includes("##TOOL_CALL##")) {
-								const callStartIdx = answerText.lastIndexOf("##TOOL_CALL##");
-								const beforeCall = answerText.substring(0, callStartIdx);
-								answerText = answerText.substring(callStartIdx);
-								insideToolCall = true;
-								toolCallAccumulator = "";
-
-								if (beforeCall.trim()) {
-									if (!roleSent) {
-										enqueueJson(controller, mkChunk({ role: "assistant" }, null));
-										roleSent = true;
-									}
-									enqueueJson(controller, mkChunk({ content: beforeCall }, null));
-								}
-							}
-
-							if (insideToolCall) {
-								toolCallAccumulator += content;
-								if (toolCallAccumulator.includes("##END_CALL##")) {
-									insideToolCall = false;
-									const extracted = toolCallAccumulator;
-									toolCallAccumulator = "";
-									const parsed = parseAndValidateToolCalls("##TOOL_CALL##" + extracted, fallbackTools);
-									if (parsed.length > 0) {
-										emitToolCallsNow(controller, parsed);
-										finalFlushed = true;
-									}
-									answerText = "";
-								}
-							}
 						}
 					}
 
