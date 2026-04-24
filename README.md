@@ -1,6 +1,6 @@
 # Qwen API Proxy
 
-将 Qwen API 转换为 OpenAI 标准格式的代理服务。
+将 Qwen API 转换为 OpenAI / Anthropic 标准格式的代理服务。
 
 ## 快速开始
 
@@ -28,6 +28,13 @@ curl http://localhost:8000/health
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3.6-plus","messages":[{"role":"user","content":"你好"}]}'
+
+# 测试 Anthropic 格式
+curl -X POST http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_QWEN_TOKEN" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-sonnet-4-20250514","max_tokens":100,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ## 支持的模型
@@ -38,6 +45,17 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 - `qwen3.6-plus-image` - 图片生成
 - `qwen3.6-plus-video` - 视频生成
 - `qwen3.6-plus-research` - 深度研究模式
+
+## API 端点
+
+### OpenAI 格式
+- `POST /v1/chat/completions` — 标准 OpenAI Chat Completions API
+- `GET /v1/models` — 模型列表
+
+### Anthropic 格式
+- `POST /v1/messages` — Anthropic Messages API（兼容 Claude Code 等工具）
+
+Anthropic 格式使用 `x-api-key` 头传递 token，支持完整的 tool use、流式响应等功能。
 
 ## 环境变量
 

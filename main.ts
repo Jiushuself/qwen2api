@@ -1,8 +1,8 @@
 /**
- * Qwen API to OpenAI Standard - Single File Deno Deploy/Playground Script
+ * Qwen API to OpenAI/Anthropic Standard - Single File Deno Deploy/Playground Script
  *
- * @version 5.1.0
- * @description 完全按照官方 payload + CORS 支持 + 搜索模式修复 + 增强工具调用支持
+ * @version 5.2.0
+ * @description 完全按照官方 payload + CORS 支持 + 搜索模式修复 + 增强工具调用支持 + Anthropic API 兼容
  */
 
 import {
@@ -71,6 +71,42 @@ type InferredIntent = "read" | "create" | "delete" | "run" | "edit" | "list" | "
 type PathHints = {
 	homeHint?: string;
 	knownPaths: string[];
+};
+
+// Anthropic API types
+type AnthropicContentBlock =
+	| { type: "text"; text: string }
+	| { type: "tool_use"; id: string; name: string; input: any }
+	| { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[] }
+	| { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+
+type AnthropicMessage = {
+	role: "user" | "assistant";
+	content: string | AnthropicContentBlock[];
+};
+
+type AnthropicTool = {
+	name: string;
+	description?: string;
+	input_schema: any;
+};
+
+type AnthropicToolChoice =
+	| { type: "auto" }
+	| { type: "any" }
+	| { type: "tool"; name: string };
+
+type AnthropicRequest = {
+	model: string;
+	max_tokens: number;
+	system?: string | Array<{ type: "text"; text: string }>;
+	messages: AnthropicMessage[];
+	tools?: AnthropicTool[];
+	tool_choice?: AnthropicToolChoice;
+	stream?: boolean;
+	temperature?: number;
+	top_p?: number;
+	metadata?: any;
 };
 
 const WINDOWS_PATH_REGEX = /[A-Za-z]:[\\/](?:[^\s"'`<>]+[\\/])*[^\s"'`<>]+/g;
@@ -1268,6 +1304,518 @@ function createQwenToOpenAIStreamTransformer(options?: {
 	});
 }
 
+// ==================== Anthropic API Conversion ====================
+
+function extractAnthropicText(content: string | AnthropicContentBlock[] | any): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.filter((b: any) => b?.type === "text")
+			.map((b: any) => b?.text || "")
+			.join("");
+	}
+	return "";
+}
+
+function extractAnthropicImages(content: string | AnthropicContentBlock[] | any): string[] {
+	if (!Array.isArray(content)) return [];
+	return content
+		.filter((b: any) => b?.type === "image" && b?.source?.type === "base64")
+		.map((b: any) => `data:${b.source.media_type};base64,${b.source.data}`);
+}
+
+function convertAnthropicToOpenAIRequest(anthReq: AnthropicRequest): any {
+	const openAIMessages: any[] = [];
+
+	// system
+	if (anthReq.system) {
+		if (typeof anthReq.system === "string") {
+			openAIMessages.push({ role: "system", content: anthReq.system });
+		} else if (Array.isArray(anthReq.system)) {
+			const text = anthReq.system.map((b) => b.text || "").join("");
+			if (text) openAIMessages.push({ role: "system", content: text });
+		}
+	}
+
+	// messages
+	for (const msg of anthReq.messages || []) {
+		if (msg.role === "user") {
+			// Check for tool_result blocks
+			const toolResults = Array.isArray(msg.content)
+				? msg.content.filter((b: any) => b?.type === "tool_result")
+				: [];
+
+			if (toolResults.length > 0) {
+				for (const tr of toolResults) {
+					const resultText = typeof tr.content === "string"
+						? tr.content
+						: Array.isArray(tr.content)
+							? tr.content.map((b: any) => b?.text || "").join("")
+							: "";
+					openAIMessages.push({
+						role: "tool",
+						tool_call_id: tr.tool_use_id,
+						content: resultText,
+					});
+				}
+				// Also check for text content alongside tool_results
+				const textContent = Array.isArray(msg.content)
+					? msg.content.filter((b: any) => b?.type === "text").map((b: any) => b?.text || "").join("")
+					: "";
+				if (textContent) {
+					openAIMessages.push({ role: "user", content: textContent });
+				}
+			} else {
+				const text = extractAnthropicText(msg.content);
+				const images = extractAnthropicImages(msg.content);
+				if (images.length > 0) {
+					const contentArr: any[] = [];
+					if (text) contentArr.push({ type: "text", text });
+					for (const img of images) {
+						contentArr.push({ type: "image_url", image_url: { url: img } });
+					}
+					openAIMessages.push({ role: "user", content: contentArr });
+				} else {
+					openAIMessages.push({ role: "user", content: text });
+				}
+			}
+		} else if (msg.role === "assistant") {
+			if (Array.isArray(msg.content)) {
+				const toolUseBlocks = msg.content.filter((b: any) => b?.type === "tool_use");
+				const textBlocks = msg.content.filter((b: any) => b?.type === "text");
+				const text = textBlocks.map((b: any) => b?.text || "").join("");
+
+				if (toolUseBlocks.length > 0) {
+					openAIMessages.push({
+						role: "assistant",
+						content: text || null,
+						tool_calls: toolUseBlocks.map((b: any) => ({
+							id: b.id,
+							type: "function",
+							function: {
+								name: b.name,
+								arguments: JSON.stringify(b.input || {}),
+							},
+						})),
+					});
+				} else if (text) {
+					openAIMessages.push({ role: "assistant", content: text });
+				}
+			} else {
+				openAIMessages.push({ role: "assistant", content: msg.content });
+			}
+		}
+	}
+
+	// tools
+	const openAITools = (anthReq.tools || []).map((t) => ({
+		type: "function",
+		function: {
+			name: t.name,
+			description: t.description || "",
+			parameters: t.input_schema || { type: "object", properties: {} },
+		},
+	}));
+
+	// tool_choice
+	let openAIToolChoice: any = undefined;
+	if (anthReq.tool_choice) {
+		switch (anthReq.tool_choice.type) {
+			case "auto":
+				openAIToolChoice = "auto";
+				break;
+			case "any":
+				openAIToolChoice = "required";
+				break;
+			case "tool":
+				openAIToolChoice = { type: "function", function: { name: anthReq.tool_choice.name } };
+				break;
+		}
+	}
+
+	return {
+		model: anthReq.model,
+		messages: openAIMessages,
+		tools: openAITools.length > 0 ? openAITools : undefined,
+		tool_choice: openAIToolChoice,
+		stream: anthReq.stream !== false,
+		temperature: anthReq.temperature,
+		top_p: anthReq.top_p,
+	};
+}
+
+function createQwenToAnthropicStreamTransformer(options?: {
+	hasCustomTools?: boolean;
+	forcedToolName?: string | null;
+	fallbackUserText?: string;
+	fallbackTools?: OpenAITool[];
+	lastToolResultText?: string;
+	lastAssistantToolName?: string;
+	lastAssistantToolArgsText?: string;
+	lastMessageRole?: string;
+	hadRecentToolSuccess?: boolean;
+	pathHints?: PathHints;
+	onComplete?: () => void | Promise<void>;
+	inputTokens?: number;
+}) {
+	const hasCustomTools = !!options?.hasCustomTools;
+	const forcedToolName = options?.forcedToolName || null;
+	const fallbackTools = options?.fallbackTools || [];
+	const fallbackUserText = options?.fallbackUserText || "";
+	const pathHints = options?.pathHints || { knownPaths: [] };
+	const onComplete = options?.onComplete;
+	const inputTokens = options?.inputTokens || 0;
+
+	const decoder = new TextDecoder();
+	const encoder = new TextEncoder();
+	let buffer = "";
+	const messageId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+	let answerText = "";
+	const nativeToolById: Record<string, { name: string; args: string }> = {};
+	let messageStarted = false;
+	let textBlockStarted = false;
+	let textBlockStopped = false;
+	let finalFlushed = false;
+	let outputTokens = 0;
+
+	const enqueueEvent = (controller: any, event: string, data: any) => {
+		controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+	};
+
+	const startMessage = (controller: any) => {
+		if (messageStarted) return;
+		messageStarted = true;
+		enqueueEvent(controller, "message_start", {
+			type: "message_start",
+			message: {
+				id: messageId,
+				type: "message",
+				role: "assistant",
+				content: [],
+				model: "qwen-proxy",
+				stop_reason: null,
+				usage: { input_tokens: inputTokens, output_tokens: 0 },
+			},
+		});
+	};
+
+	const startTextBlock = (controller: any, index: number) => {
+		if (textBlockStarted) return;
+		textBlockStarted = true;
+		enqueueEvent(controller, "content_block_start", {
+			type: "content_block_start",
+			index,
+			content_block: { type: "text", text: "" },
+		});
+	};
+
+	const stopTextBlock = (controller: any, index: number) => {
+		if (textBlockStopped) return;
+		textBlockStopped = true;
+		enqueueEvent(controller, "content_block_stop", {
+			type: "content_block_stop",
+			index,
+		});
+	};
+
+	const emitToolUseBlock = (controller: any, index: number, toolCall: ParsedToolCall) => {
+		enqueueEvent(controller, "content_block_start", {
+			type: "content_block_start",
+			index,
+			content_block: { type: "tool_use", id: toolCall.id, name: toolCall.name, input: {} },
+		});
+		const inputJson = JSON.stringify(toolCall.input ?? {});
+		if (inputJson.length > 0) {
+			enqueueEvent(controller, "content_block_delta", {
+				type: "content_block_delta",
+				index,
+				delta: { type: "input_json_delta", partial_json: inputJson },
+			});
+		}
+		enqueueEvent(controller, "content_block_stop", {
+			type: "content_block_stop",
+			index,
+		});
+	};
+
+	const flushBufferedResult = (controller: any) => {
+		if (finalFlushed) return;
+		finalFlushed = true;
+
+		startMessage(controller);
+
+		let parsedCalls: ParsedToolCall[] = [];
+
+		if (hasCustomTools) {
+			// Try native tool calls first
+			if (Object.keys(nativeToolById).length > 0) {
+				parsedCalls = Object.keys(nativeToolById).map((id) => {
+					const tc = nativeToolById[id];
+					return {
+						id: id || `toolu_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+						name: tc.name,
+						input: safeJsonParse(tc.args, { raw: tc.args }),
+					};
+				}).filter((tc) => !!tc.name);
+			}
+
+			// Fallback: parse from text
+			if (parsedCalls.length === 0) {
+				parsedCalls = parseAndValidateToolCalls(answerText, fallbackTools);
+			}
+
+			// Forced tool
+			if (parsedCalls.length === 0 && forcedToolName) {
+				const exists = fallbackTools.some((t) => t?.function?.name === forcedToolName);
+				if (exists) {
+					parsedCalls = [{
+						id: `toolu_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+						name: forcedToolName,
+						input: {},
+					}];
+				}
+			}
+
+			// Normalize
+			if (parsedCalls.length > 0) {
+				parsedCalls = normalizeParsedToolCalls(parsedCalls, fallbackTools, fallbackUserText, pathHints);
+			}
+		}
+
+		let blockIndex = 0;
+
+		if (parsedCalls.length > 0) {
+			// Emit text block with cleaned content if any
+			const cleanedText = sanitizeToolComplaintText(answerText);
+			if (cleanedText) {
+				startTextBlock(controller, blockIndex);
+				enqueueEvent(controller, "content_block_delta", {
+					type: "content_block_delta",
+					index: blockIndex,
+					delta: { type: "text_delta", text: cleanedText },
+				});
+				stopTextBlock(controller, blockIndex);
+				blockIndex++;
+			}
+
+			// Emit tool_use blocks
+			for (const tc of parsedCalls) {
+				// Convert ParsedToolCall id to toolu_ format
+				const toolCall = { ...tc, id: tc.id.startsWith("toolu_") ? tc.id : `toolu_${tc.id.replace(/^call_/, "")}` };
+				emitToolUseBlock(controller, blockIndex, toolCall);
+				blockIndex++;
+			}
+
+			outputTokens += parsedCalls.length * 10;
+			enqueueEvent(controller, "message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "tool_use" },
+				usage: { output_tokens: outputTokens },
+			});
+		} else {
+			// Text-only response
+			const finalAnswer = hasCustomTools ? sanitizeToolComplaintText(answerText) : answerText;
+			if (finalAnswer) {
+				startTextBlock(controller, blockIndex);
+				enqueueEvent(controller, "content_block_delta", {
+					type: "content_block_delta",
+					index: blockIndex,
+					delta: { type: "text_delta", text: finalAnswer },
+				});
+				stopTextBlock(controller, blockIndex);
+				outputTokens += Math.ceil(finalAnswer.length / 4);
+			}
+
+			enqueueEvent(controller, "message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: { output_tokens: outputTokens },
+			});
+		}
+
+		enqueueEvent(controller, "message_stop", { type: "message_stop" });
+	};
+
+	return new TransformStream({
+		transform(chunk, controller) {
+			const raw = decoder.decode(chunk, { stream: true });
+			buffer += raw;
+
+			const lines = buffer.split("\n\n");
+			buffer = lines.pop() || "";
+
+			for (const line of lines) {
+				if (!line.trim()) continue;
+
+				let dataStr = line.replace(/^data:\s*/, "").trim();
+				if (dataStr === "[DONE]") {
+					flushBufferedResult(controller);
+					if (onComplete) onComplete();
+					continue;
+				}
+
+				try {
+					const qwenChunk = JSON.parse(dataStr);
+
+					let content = "";
+					let phase = "";
+					let phaseStatus = "";
+					let phaseExtra: any = {};
+
+					if (qwenChunk.choices && qwenChunk.choices[0]) {
+						const delta = qwenChunk.choices[0].delta || qwenChunk.choices[0].message;
+						content = delta?.content || "";
+						phase = delta?.phase || "";
+						phaseStatus = delta?.status || "";
+						phaseExtra = delta?.extra || {};
+					} else if (qwenChunk.content) {
+						content = qwenChunk.content;
+						phase = qwenChunk.phase || "";
+						phaseStatus = qwenChunk.status || "";
+						phaseExtra = qwenChunk.extra || {};
+					}
+
+					if (!hasCustomTools) {
+						// Simple text streaming
+						if (content) {
+							startMessage(controller);
+							startTextBlock(controller, 0);
+							enqueueEvent(controller, "content_block_delta", {
+								type: "content_block_delta",
+								index: 0,
+								delta: { type: "text_delta", text: content },
+							});
+							outputTokens += Math.ceil(content.length / 4);
+						}
+						continue;
+					}
+
+					// Tool calling mode
+					if (content) {
+						if (phase === "tool_call") {
+							const tcId = phaseExtra?.tool_call_id || "tc_0";
+							if (!nativeToolById[tcId]) nativeToolById[tcId] = { name: "", args: "" };
+							const obj = safeJsonParse(content, null);
+							if (obj && typeof obj === "object") {
+								if (obj.name) nativeToolById[tcId].name = obj.name;
+								if (obj.arguments) nativeToolById[tcId].args += String(obj.arguments);
+							} else {
+								nativeToolById[tcId].args += content;
+							}
+						} else {
+							answerText += content;
+						}
+					}
+
+					if (phaseStatus === "finished" && phase === "answer") {
+						flushBufferedResult(controller);
+					}
+				} catch (e) {
+					// ignore parse errors
+				}
+			}
+		},
+		flush(controller) {
+			flushBufferedResult(controller);
+			if (onComplete) onComplete();
+		},
+	});
+}
+
+function parseAnthropicStreamToMessage(rawSseText: string, model: string) {
+	let text = "";
+	const toolCalls: { id: string; name: string; input: any }[] = [];
+
+	for (const line of rawSseText.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("data:")) continue;
+		const dataStr = trimmed.slice(5).trim();
+		if (!dataStr) continue;
+
+		try {
+			const event = JSON.parse(dataStr);
+			if (event.type === "content_block_delta") {
+				if (event.delta?.type === "text_delta") {
+					text += event.delta.text || "";
+				} else if (event.delta?.type === "input_json_delta") {
+					// Accumulate tool input - will be parsed from content blocks
+				}
+			} else if (event.type === "content_block_start") {
+				if (event.content_block?.type === "tool_use") {
+					toolCalls.push({
+						id: event.content_block.id,
+						name: event.content_block.name,
+						input: "",
+					});
+				}
+			}
+		} catch {
+			// ignore
+		}
+	}
+
+	// Parse tool inputs from accumulated text (our format emits full JSON in delta)
+	// Re-parse to get tool input_json_delta properly
+	const toolInputs: Record<number, string> = {};
+	for (const line of rawSseText.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("data:")) continue;
+		try {
+			const event = JSON.parse(trimmed.slice(5).trim());
+			if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+				toolInputs[event.index] = "";
+			}
+			if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
+				// Find which block index this belongs to
+				const idx = event.index ?? 0;
+				if (toolInputs[idx] !== undefined) {
+					toolInputs[idx] += event.delta.partial_json || "";
+				}
+			}
+		} catch {
+			// ignore
+		}
+	}
+
+	// Build final content blocks
+	const content: any[] = [];
+	if (text) content.push({ type: "text", text });
+
+	// Re-parse tool calls with proper index tracking
+	let toolIndex = 0;
+	for (const line of rawSseText.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("data:")) continue;
+		try {
+			const event = JSON.parse(trimmed.slice(5).trim());
+			if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+				const inputJson = toolInputs[event.index] || "{}";
+				content.push({
+					type: "tool_use",
+					id: event.content_block.id,
+					name: event.content_block.name,
+					input: safeJsonParse(inputJson, {}),
+				});
+				toolIndex++;
+			}
+		} catch {
+			// ignore
+		}
+	}
+
+	const hasToolUse = content.some((b) => b.type === "tool_use");
+
+	return {
+		id: `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+		type: "message",
+		role: "assistant",
+		content,
+		model,
+		stop_reason: hasToolUse ? "tool_use" : "end_turn",
+		usage: { input_tokens: 0, output_tokens: 0 },
+	};
+}
+
 const app = new Application();
 const router = new Router();
 
@@ -1275,7 +1823,7 @@ const router = new Router();
 app.use(async (ctx, next) => {
 	ctx.response.headers.set("Access-Control-Allow-Origin", "*");
 	ctx.response.headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-	ctx.response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+	ctx.response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version");
 
 	if (ctx.request.method === "OPTIONS") {
 		ctx.response.status = 204;
@@ -1300,7 +1848,11 @@ const authMiddleware: Middleware = async (ctx, next) => {
 		ctx.state.qwenToken = config.qwenTokenEnv;
 		ctx.state.ssxmodItna = config.ssxmodItnaEnv;
 	} else {
-		const header = ctx.request.headers.get("Authorization")?.replace(/^Bearer /, "") || "";
+		// Support both OpenAI (Authorization: Bearer) and Anthropic (x-api-key) headers
+		let header = ctx.request.headers.get("Authorization")?.replace(/^Bearer /, "") || "";
+		if (!header) {
+			header = ctx.request.headers.get("x-api-key") || "";
+		}
 		if (!header) return ctx.throw(401, { error: "No Qwen token available." });
 		const parts = header.split(";");
 		ctx.state.qwenToken = config.salt ? (parts[1] || "").trim() : (parts[0] || "").trim();
@@ -1311,7 +1863,7 @@ const authMiddleware: Middleware = async (ctx, next) => {
 app.use(authMiddleware);
 
 router.get("/", (ctx) => {
-	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.1.0</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.1.0 支持增强工具调用（Function Calling）</p><p>API 文档请参考 README</p></body></html>`;
+	const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qwen Proxy v5.2.0</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f172a;color:#fff"><h1>✅ 服务运行正常</h1><p>v5.2.0 支持 OpenAI + Anthropic 双格式 API</p><p>OpenAI: POST /v1/chat/completions</p><p>Anthropic: POST /v1/messages</p></body></html>`;
 	ctx.response.body = html;
 	ctx.response.headers.set("Content-Type", "text/html");
 });
@@ -1388,12 +1940,122 @@ const handleChatCompletions = async (ctx: Context) => {
 router.post("/v1/chat/completions", handleChatCompletions);
 router.post("/chat/completions", handleChatCompletions);
 
-router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.0.9" }; });
+// ==================== Anthropic Messages API ====================
+
+const handleAnthropicMessages = async (ctx: Context) => {
+	const token = ctx.state.qwenToken;
+	if (!token) return ctx.throw(401, { error: "No Qwen token available." });
+
+	try {
+		const anthReq: AnthropicRequest = await ctx.request.body({ type: "json" }).value;
+
+		// Convert Anthropic format to OpenAI format
+		const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
+
+		// Use existing OpenAI → Qwen transformation
+		const {
+			request: qwenRequest,
+			chatId,
+			shouldAutoDelete,
+			hasCustomTools,
+			forcedToolName,
+			lastUserText,
+			lastToolResultText,
+			lastAssistantToolName,
+			lastAssistantToolArgsText,
+			lastMessageRole,
+			hadRecentToolSuccess,
+			pathHints,
+			tools,
+		} = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
+
+		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
+		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" };
+
+		logger.info("[Anthropic] Sending to Qwen", { chatId, model: qwenRequest.model });
+
+		const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(qwenRequest) });
+
+		if (!upstream.ok) {
+			const text = await upstream.text();
+			logger.error("[Anthropic] Upstream error", { status: upstream.status, body: text });
+			if (shouldAutoDelete && chatId) await deleteChat(chatId, token);
+			ctx.response.status = upstream.status;
+			ctx.response.body = {
+				type: "error",
+				error: { type: "api_error", message: `Upstream failed: ${text}` },
+			};
+			return;
+		}
+
+		const isStream = anthReq.stream !== false;
+
+		if (isStream) {
+			// Streaming response
+			ctx.response.headers.set("Content-Type", "text/event-stream");
+			ctx.response.headers.set("Cache-Control", "no-cache");
+			ctx.response.headers.set("Connection", "keep-alive");
+
+			const onComplete = shouldAutoDelete ? async () => { if (chatId) await deleteChat(chatId, token); } : undefined;
+
+			const transformed = upstream.body!.pipeThrough(createQwenToAnthropicStreamTransformer({
+				hasCustomTools,
+				forcedToolName,
+				fallbackUserText: lastUserText,
+				lastToolResultText,
+				lastAssistantToolName,
+				lastAssistantToolArgsText,
+				lastMessageRole,
+				hadRecentToolSuccess,
+				pathHints,
+				fallbackTools: tools,
+				onComplete,
+				inputTokens: 0,
+			}));
+
+			ctx.response.body = transformed;
+		} else {
+			// Non-streaming: pipe Qwen SSE through Anthropic transformer, then parse
+			const anthropicStream = upstream.body!.pipeThrough(createQwenToAnthropicStreamTransformer({
+				hasCustomTools,
+				forcedToolName,
+				fallbackUserText: lastUserText,
+				lastToolResultText,
+				lastAssistantToolName,
+				lastAssistantToolArgsText,
+				lastMessageRole,
+				hadRecentToolSuccess,
+				pathHints,
+				fallbackTools: tools,
+				onComplete: shouldAutoDelete ? async () => { if (chatId) await deleteChat(chatId, token); } : undefined,
+				inputTokens: 0,
+			}));
+
+			const rawAnthropicSse = await new Response(anthropicStream).text();
+
+			ctx.response.headers.set("Content-Type", "application/json");
+			ctx.response.body = parseAnthropicStreamToMessage(rawAnthropicSse, qwenRequest.model || "qwen-proxy");
+		}
+
+	} catch (e: any) {
+		logger.error("[Anthropic] handleAnthropicMessages error", e);
+		ctx.response.status = 500;
+		ctx.response.body = {
+			type: "error",
+			error: { type: "api_error", message: e.message },
+		};
+	}
+};
+
+router.post("/v1/messages", handleAnthropicMessages);
+router.post("/messages", handleAnthropicMessages);
+
+router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.2.0" }; });
 
 app.use(router.routes());
 app.use(router.allowedMethods());
 
 app.use((ctx) => { ctx.response.status = 404; ctx.response.body = { error: "Not Found" }; });
 
-console.log("🚀 Qwen Proxy v5.1.0 启动 - 支持增强工具调用");
+console.log("🚀 Qwen Proxy v5.2.0 启动 - 支持 OpenAI + Anthropic 双格式 API");
 Deno.serve((req) => app.handle(req));
