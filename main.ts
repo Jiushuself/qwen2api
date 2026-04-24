@@ -2084,7 +2084,9 @@ router.post("/v1/debug/anthropic", async (ctx: Context) => {
 	const token = ctx.state.qwenToken;
 	const anthReq: AnthropicRequest = await ctx.request.body({ type: "json" }).value;
 	const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
-	ctx.response.body = { anthropic_input: anthReq, openai_converted: openAIRequest };
+	const qwenResult = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
+	const encoded = jsonEncodeNonAscii(qwenResult.request);
+	ctx.response.body = { qwen_body_preview: encoded.substring(0, 500) };
 });
 
 router.post("/v1/debug/openai", async (ctx: Context) => {
