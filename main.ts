@@ -1951,6 +1951,7 @@ const handleAnthropicMessages = async (ctx: Context) => {
 
 		// Convert Anthropic format to OpenAI format
 		const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
+		logger.info("[Anthropic] Converted OpenAI request", { model: openAIRequest.model, messageCount: openAIRequest.messages?.length, lastMessage: JSON.stringify(openAIRequest.messages?.slice(-1)?.[0]).substring(0, 200) });
 
 		// Use existing OpenAI → Qwen transformation
 		const {
@@ -1968,6 +1969,8 @@ const handleAnthropicMessages = async (ctx: Context) => {
 			pathHints,
 			tools,
 		} = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
+
+		logger.info("[Anthropic] Qwen request", { chatId, model: qwenRequest.model, messageContent: qwenRequest.messages?.[0]?.content?.substring(0, 200) });
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
 		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" };
