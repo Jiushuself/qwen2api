@@ -1885,11 +1885,13 @@ const handleChatCompletions = async (ctx: Context) => {
 		const { request: qwenRequest, chatId, isVideo, shouldAutoDelete, hasCustomTools, forcedToolName, lastUserText, lastToolResultText, lastAssistantToolName, lastAssistantToolArgsText, lastMessageRole, hadRecentToolSuccess, pathHints, tools } = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
-		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0" };
+		const requestBody = JSON.stringify(qwenRequest);
+		const bodyBytes = new TextEncoder().encode(requestBody);
+		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0", "Content-Length": String(bodyBytes.length) };
 
 		logger.info("Sending to Qwen", { chatId, model: qwenRequest.model });
 
-		const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(qwenRequest) });
+		const upstream = await fetch(url, { method: "POST", headers, body: bodyBytes });
 
 		if (!upstream.ok) {
 			const text = await upstream.text();
@@ -1989,13 +1991,13 @@ const handleAnthropicMessages = async (ctx: Context) => {
 		logger.info("[Anthropic] Qwen request", { chatId, model: qwenRequest.model, messageContent: qwenRequest.messages?.[0]?.content?.substring(0, 200) });
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
-		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0" };
+		const requestBodyStr = JSON.stringify(qwenRequest);
+		const bodyBytes = new TextEncoder().encode(requestBodyStr);
+		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0", "Content-Length": String(bodyBytes.length) };
 
 		logger.info("[Anthropic] Sending to Qwen", { chatId, model: qwenRequest.model });
 
-		const requestBodyStr = JSON.stringify(qwenRequest);
-
-		const upstream = await fetch(url, { method: "POST", headers, body: requestBodyStr });
+		const upstream = await fetch(url, { method: "POST", headers, body: bodyBytes });
 
 		if (!upstream.ok) {
 			const text = await upstream.text();
