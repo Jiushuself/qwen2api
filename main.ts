@@ -1957,6 +1957,18 @@ const handleAnthropicMessages = async (ctx: Context) => {
 	try {
 		const anthReq: AnthropicRequest = await ctx.request.body({ type: "json" }).value;
 
+		// Log raw Anthropic request for debugging
+		logger.info("[Anthropic] Raw request", {
+			model: anthReq.model,
+			hasTools: !!(anthReq.tools && anthReq.tools.length > 0),
+			toolCount: anthReq.tools?.length || 0,
+			toolChoice: JSON.stringify(anthReq.tool_choice),
+			messageCount: anthReq.messages?.length,
+			systemType: typeof anthReq.system,
+			systemLength: typeof anthReq.system === "string" ? anthReq.system.length : Array.isArray(anthReq.system) ? JSON.stringify(anthReq.system).length : 0,
+			lastMessageRole: anthReq.messages?.slice(-1)?.[0]?.role,
+		});
+
 		// Convert Anthropic format to OpenAI format
 		const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
 
@@ -1975,7 +1987,14 @@ const handleAnthropicMessages = async (ctx: Context) => {
 			openAIRequest.model = "qwen3.6-plus";
 		}
 
-		logger.info("[Anthropic] Request", { model: openAIRequest.model, messageCount: openAIRequest.messages?.length });
+		logger.info("[Anthropic] Converted", {
+			model: openAIRequest.model,
+			messageCount: openAIRequest.messages?.length,
+			hasTools: !!(openAIRequest.tools && openAIRequest.tools.length > 0),
+			toolNames: openAIRequest.tools?.map((t: any) => t?.function?.name) || [],
+			toolChoice: JSON.stringify(openAIRequest.tool_choice),
+			systemMsg: openAIRequest.messages?.[0]?.role === "system" ? openAIRequest.messages[0]?.content?.substring(0, 200) : "none",
+		});
 
 		// Use existing OpenAI → Qwen transformation
 		const {
@@ -2078,6 +2097,25 @@ const handleAnthropicMessages = async (ctx: Context) => {
 
 router.post("/v1/messages", handleAnthropicMessages);
 router.post("/messages", handleAnthropicMessages);
+
+// Debug: show what Claude Code sends
+router.post("/v1/debug/raw", async (ctx: Context) => {
+	const body = await ctx.request.body({ type: "json" }).value;
+	ctx.response.body = {
+		model: body.model,
+		max_tokens: body.max_tokens,
+		hasSystem: !!body.system,
+		systemType: typeof body.system,
+		systemPreview: typeof body.system === "string" ? body.system.substring(0, 300) : JSON.stringify(body.system).substring(0, 300),
+		messageCount: body.messages?.length,
+		hasTools: !!(body.tools && body.tools.length > 0),
+		toolCount: body.tools?.length || 0,
+		toolNames: body.tools?.map((t: any) => t.name) || [],
+		toolChoice: body.tool_choice,
+		lastMessage: JSON.stringify(body.messages?.slice(-1)?.[0]).substring(0, 300),
+		stream: body.stream,
+	};
+});
 
 
 router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.2.0" }; });
