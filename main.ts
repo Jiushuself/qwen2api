@@ -1885,7 +1885,7 @@ const handleChatCompletions = async (ctx: Context) => {
 		const { request: qwenRequest, chatId, isVideo, shouldAutoDelete, hasCustomTools, forcedToolName, lastUserText, lastToolResultText, lastAssistantToolName, lastAssistantToolArgsText, lastMessageRole, hadRecentToolSuccess, pathHints, tools } = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
-		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" };
+		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0" };
 
 		logger.info("Sending to Qwen", { chatId, model: qwenRequest.model });
 
@@ -1951,7 +1951,23 @@ const handleAnthropicMessages = async (ctx: Context) => {
 
 		// Convert Anthropic format to OpenAI format
 		const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
-		logger.info("[Anthropic] Converted OpenAI request", { model: openAIRequest.model, messageCount: openAIRequest.messages?.length, lastMessage: JSON.stringify(openAIRequest.messages?.slice(-1)?.[0]).substring(0, 200) });
+
+		// Map Anthropic model names to Qwen models
+		const anthropicModelMap: Record<string, string> = {
+			"claude-opus-4-20250514": "qwen3.6-plus",
+			"claude-sonnet-4-20250514": "qwen3.6-plus",
+			"claude-haiku-4-5-20251001": "qwen3.6-plus",
+			"claude-3-5-sonnet-20241022": "qwen3.6-plus",
+			"claude-3-5-haiku-20241022": "qwen3.6-plus",
+			"claude-3-opus-20240229": "qwen3.6-plus",
+		};
+		if (anthropicModelMap[openAIRequest.model]) {
+			openAIRequest.model = anthropicModelMap[openAIRequest.model];
+		} else if (openAIRequest.model.startsWith("claude")) {
+			openAIRequest.model = "qwen3.6-plus";
+		}
+
+		logger.info("[Anthropic] Converted OpenAI request", { model: openAIRequest.model, messageCount: openAIRequest.messages?.length });
 
 		// Use existing OpenAI → Qwen transformation
 		const {
@@ -1973,12 +1989,11 @@ const handleAnthropicMessages = async (ctx: Context) => {
 		logger.info("[Anthropic] Qwen request", { chatId, model: qwenRequest.model, messageContent: qwenRequest.messages?.[0]?.content?.substring(0, 200) });
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
-		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" };
+		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0" };
 
 		logger.info("[Anthropic] Sending to Qwen", { chatId, model: qwenRequest.model });
 
 		const requestBodyStr = JSON.stringify(qwenRequest);
-		logger.info("[Anthropic] Request body preview", { preview: requestBodyStr.substring(0, 500) });
 
 		const upstream = await fetch(url, { method: "POST", headers, body: requestBodyStr });
 
