@@ -199,6 +199,12 @@ function safeJsonParse(input: string, fallback: any) {
 	}
 }
 
+function jsonEncodeNonAscii(obj: any): string {
+	return JSON.stringify(obj).replace(/[\u0080-\uFFFF]/g, (ch) => {
+		return "\\u" + ("0000" + ch.charCodeAt(0).toString(16)).slice(-4);
+	});
+}
+
 function normalizeToolArguments(argumentsText: string): any {
 	if (!argumentsText) return {};
 	const parsed = safeJsonParse(argumentsText, null);
@@ -1885,7 +1891,7 @@ const handleChatCompletions = async (ctx: Context) => {
 		const { request: qwenRequest, chatId, isVideo, shouldAutoDelete, hasCustomTools, forcedToolName, lastUserText, lastToolResultText, lastAssistantToolName, lastAssistantToolArgsText, lastMessageRole, hadRecentToolSuccess, pathHints, tools } = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
-		const requestBody = JSON.stringify(qwenRequest);
+		const requestBody = jsonEncodeNonAscii(qwenRequest);
 		const bodyBytes = new TextEncoder().encode(requestBody);
 		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0", "Content-Length": String(bodyBytes.length) };
 
@@ -1991,7 +1997,7 @@ const handleAnthropicMessages = async (ctx: Context) => {
 		logger.info("[Anthropic] Qwen request", { chatId, model: qwenRequest.model, messageContent: qwenRequest.messages?.[0]?.content?.substring(0, 200) });
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
-		const requestBodyStr = JSON.stringify(qwenRequest);
+		const requestBodyStr = jsonEncodeNonAscii(qwenRequest);
 		const bodyBytes = new TextEncoder().encode(requestBodyStr);
 		const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8", "User-Agent": "Mozilla/5.0", "Content-Length": String(bodyBytes.length) };
 
