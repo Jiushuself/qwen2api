@@ -1975,7 +1975,7 @@ const handleAnthropicMessages = async (ctx: Context) => {
 			openAIRequest.model = "qwen3.6-plus";
 		}
 
-		logger.info("[Anthropic] Converted OpenAI request", { model: openAIRequest.model, messageCount: openAIRequest.messages?.length });
+		logger.info("[Anthropic] Request", { model: openAIRequest.model, messageCount: openAIRequest.messages?.length });
 
 		// Use existing OpenAI → Qwen transformation
 		const {
@@ -1994,7 +1994,7 @@ const handleAnthropicMessages = async (ctx: Context) => {
 			tools,
 		} = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
 
-		logger.info("[Anthropic] Qwen request", { chatId, model: qwenRequest.model, messageContent: qwenRequest.messages?.[0]?.content?.substring(0, 200) });
+		logger.info("[Anthropic] Qwen request", { chatId, model: qwenRequest.model });
 
 		const url = `${QWEN_API_BASE_URL}?chat_id=${chatId}`;
 		const requestBodyStr = jsonEncodeNonAscii(qwenRequest);
@@ -2079,22 +2079,6 @@ const handleAnthropicMessages = async (ctx: Context) => {
 router.post("/v1/messages", handleAnthropicMessages);
 router.post("/messages", handleAnthropicMessages);
 
-// Debug endpoint - shows converted request without sending to Qwen
-router.post("/v1/debug/anthropic", async (ctx: Context) => {
-	const token = ctx.state.qwenToken;
-	const anthReq: AnthropicRequest = await ctx.request.body({ type: "json" }).value;
-	const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
-	const qwenResult = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
-	const encoded = jsonEncodeNonAscii(qwenResult.request);
-	ctx.response.body = { qwen_body_preview: encoded.substring(0, 500) };
-});
-
-router.post("/v1/debug/openai", async (ctx: Context) => {
-	const token = ctx.state.qwenToken;
-	const openAIRequest = await ctx.request.body({ type: "json" }).value;
-	const result = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
-	ctx.response.body = { qwen_request: result.request, chatId: result.chatId };
-});
 
 router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.2.0" }; });
 
