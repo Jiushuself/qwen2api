@@ -1977,7 +1977,10 @@ const handleAnthropicMessages = async (ctx: Context) => {
 
 		logger.info("[Anthropic] Sending to Qwen", { chatId, model: qwenRequest.model });
 
-		const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(qwenRequest) });
+		const requestBodyStr = JSON.stringify(qwenRequest);
+		logger.info("[Anthropic] Request body preview", { preview: requestBodyStr.substring(0, 500) });
+
+		const upstream = await fetch(url, { method: "POST", headers, body: requestBodyStr });
 
 		if (!upstream.ok) {
 			const text = await upstream.text();
@@ -2052,6 +2055,21 @@ const handleAnthropicMessages = async (ctx: Context) => {
 
 router.post("/v1/messages", handleAnthropicMessages);
 router.post("/messages", handleAnthropicMessages);
+
+// Debug endpoint - shows converted request without sending to Qwen
+router.post("/v1/debug/anthropic", async (ctx: Context) => {
+	const token = ctx.state.qwenToken;
+	const anthReq: AnthropicRequest = await ctx.request.body({ type: "json" }).value;
+	const openAIRequest = convertAnthropicToOpenAIRequest(anthReq);
+	ctx.response.body = { anthropic_input: anthReq, openai_converted: openAIRequest };
+});
+
+router.post("/v1/debug/openai", async (ctx: Context) => {
+	const token = ctx.state.qwenToken;
+	const openAIRequest = await ctx.request.body({ type: "json" }).value;
+	const result = await transformOpenAIRequestToQwen(openAIRequest, token, ctx.state.ssxmodItna);
+	ctx.response.body = { qwen_request: result.request, chatId: result.chatId };
+});
 
 router.get("/health", (ctx) => { ctx.response.body = { status: "healthy", version: "5.2.0" }; });
 
