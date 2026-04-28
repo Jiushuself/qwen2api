@@ -301,6 +301,27 @@ function buildPromptWithTools(
 	return lines.join("\n\n");
 }
 
+function extractQwenNativeToolCallInput(rawArgs: string): any {
+	const parsed = safeJsonParse(rawArgs, null);
+	if (!parsed || typeof parsed !== "object") return { raw: rawArgs };
+
+	// Qwen returns {name, arguments: "json_string"} — extract the nested arguments
+	if (typeof parsed.arguments === "string") {
+		const inner = safeJsonParse(parsed.arguments, null);
+		if (inner && typeof inner === "object") return inner;
+		return { raw: rawArgs };
+	}
+	if (typeof parsed.arguments === "object" && parsed.arguments !== null) {
+		return parsed.arguments;
+	}
+	// Alternative format: {name, input: {...}}
+	if (typeof parsed.input === "object" && parsed.input !== null) {
+		return parsed.input;
+	}
+	// Fallback: return the whole parsed object
+	return parsed;
+}
+
 function parseAndValidateToolCalls(
 	answer: string,
 	tools: OpenAITool[]
@@ -1162,7 +1183,7 @@ function createQwenToOpenAIStreamTransformer(options?: {
 					return {
 						id: id || `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
 						name: tc.name,
-						input: safeJsonParse(tc.args, { raw: tc.args }),
+						input: extractQwenNativeToolCallInput(tc.args),
 					};
 				}).filter((tc) => !!tc.name);
 			}
@@ -1185,6 +1206,7 @@ function createQwenToOpenAIStreamTransformer(options?: {
 			}
 
 			if (parsedCalls.length > 0) {
+				parsedCalls = normalizeParsedToolCalls(parsedCalls, fallbackTools, fallbackUserText, pathHints);
 				parsedCalls.forEach((tc, idx) => {
 					enqueueJson(controller, mkChunk({
 						tool_calls: [{
@@ -1285,7 +1307,7 @@ function createQwenToOpenAIStreamTransformer(options?: {
 							const obj = safeJsonParse(content, null);
 							if (obj && typeof obj === "object") {
 								if (obj.name) nativeToolById[tcId].name = obj.name;
-								if (obj.arguments) nativeToolById[tcId].args += String(obj.arguments);
+								if (obj.arguments) nativeToolById[tcId].args += typeof obj.arguments === "string" ? obj.arguments : JSON.stringify(obj.arguments);
 							} else {
 								nativeToolById[tcId].args += content;
 							}
@@ -1560,7 +1582,7 @@ function createQwenToAnthropicStreamTransformer(options?: {
 					return {
 						id: id || `toolu_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
 						name: tc.name,
-						input: safeJsonParse(tc.args, { raw: tc.args }),
+						input: extractQwenNativeToolCallInput(tc.args),
 					};
 				}).filter((tc) => !!tc.name);
 			}
@@ -1704,7 +1726,7 @@ function createQwenToAnthropicStreamTransformer(options?: {
 							const obj = safeJsonParse(content, null);
 							if (obj && typeof obj === "object") {
 								if (obj.name) nativeToolById[tcId].name = obj.name;
-								if (obj.arguments) nativeToolById[tcId].args += String(obj.arguments);
+								if (obj.arguments) nativeToolById[tcId].args += typeof obj.arguments === "string" ? obj.arguments : JSON.stringify(obj.arguments);
 							} else {
 								nativeToolById[tcId].args += content;
 							}
